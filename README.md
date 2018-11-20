@@ -4,7 +4,7 @@
 Code inspired by Exploration using Random Distillation
 
 ### Installation and Usage
-The following command should train an RND agent on Montezuma's Revenge
+The following command should train an Empowerment agent on Montezuma's Revenge
 ```bash
 python run_atari.py --gamma_ext 0.999
 ```
