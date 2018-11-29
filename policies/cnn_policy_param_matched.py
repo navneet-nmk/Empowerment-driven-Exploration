@@ -203,9 +203,9 @@ class CnnPolicy(StochasticPolicy):
 
     def all_actions(self):
         all_acs = [i for i in range(self.ac_space.n)]
-        ac_one_hot = tf.one_hot(all_acs, self.ac_space.n, axis=2)
+        ac_one_hot = tf.one_hot(all_acs, self.ac_space.n, axis=-1)
+        print(ac_one_hot.shape)
         return ac_one_hot
-
 
     def define_empowerment_prediction_rew(self, convfeat, rep_size, enlargement):
         '''
@@ -215,9 +215,12 @@ class CnnPolicy(StochasticPolicy):
         :param enlargement: Enlargement factor for the networks
         :return:
         '''
+
+        logger.info("Using Empowerment BONUS ****************************************************")
+
         # Empowerment value with random features
 
-        # Random target network - Calculate the feature embedding for the next state
+        # Calculate the feature embedding for the next states
         for ph in self.ph_ob.values():
             if len(ph.shape.as_list()) == 5: # B, T, H, W, C
                 logger.info("CnnTarget: using '%s' shape %s as image input" % (ph.name, str(ph.shape)))
@@ -232,6 +235,11 @@ class CnnPolicy(StochasticPolicy):
                 rgbr = [to2d(xr)]
                 X_r = fc(rgbr[0], 'fc1r', nh=rep_size, init_scale=np.sqrt(2))
 
+        X_final = X_r[-1]
+        X_f_zeros = tf.zeros_like(X_r)
+        X_f = X_final + X_f_zeros
+        print(X_f.shape)
+
         # Predictor network. - Calculate the feature embedding for the prediction of the current state + action
 
         # Make the one hot encoding of the action to add to the state
@@ -243,96 +251,34 @@ class CnnPolicy(StochasticPolicy):
         def cond(x):
             return tf.concat([x, ac_one_hot], 1)
 
-        for ph in self.ph_ob.values():
-            if len(ph.shape.as_list()) == 5:  # B,T,H,W,C
-                logger.info("CnnTarget: using '%s' shape %s as image input" % (ph.name, str(ph.shape)))
-                xrp = ph[:,:-1]
-                xrp = tf.cast(xrp, tf.float32)
-                xrp = tf.reshape(xrp, (-1, *ph.shape.as_list()[-3:]))
-                # ph_mean, ph_std are 84x84x1, so we subtract the average of the last channel from all channels. Is this ok?
-                xrp = tf.clip_by_value((xrp - self.ph_mean) / self.ph_std, -5.0, 5.0)
-
-                xrp = tf.nn.leaky_relu(conv(xrp, 'c1rp_pred', nf=convfeat, rf=8, stride=4, init_scale=np.sqrt(2)))
-                xrp = tf.nn.leaky_relu(conv(xrp, 'c2rp_pred', nf=convfeat * 2, rf=4, stride=2, init_scale=np.sqrt(2)))
-                xrp = tf.nn.leaky_relu(conv(xrp, 'c3rp_pred', nf=convfeat * 2, rf=3, stride=1, init_scale=np.sqrt(2)))
-                rgbrp = to2d(xrp)
-
-                # X_r_hat = tf.nn.relu(fc(rgb[0], 'fc1r_hat1', nh=256 * enlargement, init_scale=np.sqrt(2)))
-                X_r_hat = tf.nn.relu(fc(cond(rgbrp), 'fc1r_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
-                X_r_hat = tf.nn.relu(fc(cond(X_r_hat), 'fc1r_hat2_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
-                X_r_hat = fc(cond(X_r_hat), 'fc1r_hat3_pred', nh=rep_size, init_scale=np.sqrt(2))
-
-        # X_r (target next states embedding) and X_r_hat (predicted next states embedding)
-
         # Empowerment calculation
 
-        # Calculate next state marginals
-        for ph in self.ph_ob.values():
-            if len(ph.shape.as_list()) == 5: # B, T, H, W, C
-                logger.info("Empowerment next state marginal: using '%s' shape %s as image input" % (ph.name, str(ph.shape)))
-                # Get the current state timesteps (i.e. leave out the last state)
-                xep = ph[:, :-1]
-                xep = tf.cast(xep, tf.float32)
-                xep = tf.reshape(xep, (-1, *ph.shape.as_list()[-3:]))
-                xep = tf.clip_by_value((xep - self.ph_mean) / self.ph_std, -5.0, 5.0)
+        # Statistics network
+        next_states = tf.stop_gradient(X_r)
+        final_state = tf.stop_gradient(X_f)
 
-                # xep consists of all the current states
-                # for each state, we pass the state in the predictor network with all the actions possible and get the
-                # corresponding next states. We then get the mean of these next states which then acts as the next state
-                # marginal used by the statistics network.
+        p_sa = tf.nn.relu(fc(cond(final_state), 'stats_hat1_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
+        p_sa = tf.nn.relu(fc(p_sa, 'stats_hat2_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
+        p_sa = tf.nn.relu(fc(p_sa, 'stats_hat3_pred', nh=32 * enlargement, init_scale=np.sqrt(2)))
+        p_sa = fc(p_sa, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
 
-                xep = tf.nn.leaky_relu(conv(xep, 'c1rp_pred', nf=convfeat, rf=8, stride=4, init_scale=np.sqrt(2)))
-                xep = tf.nn.leaky_relu(conv(xep, 'c2rp_pred', nf=convfeat * 2, rf=4, stride=2, init_scale=np.sqrt(2)))
-                xep = tf.nn.leaky_relu(conv(xep, 'c3rp_pred', nf=convfeat * 2, rf=3, stride=1, init_scale=np.sqrt(2)))
-                rgbep = to2d(xep)
+        p_s_a = tf.nn.relu(fc(cond(next_states), 'stats_hat1_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
+        p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat2_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
+        p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat3_pred', nh=32 * enlargement, init_scale=np.sqrt(2)))
+        p_s_a = fc(p_s_a, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
 
-                all_actions = self.all_actions()
-                print(all_actions.shape)
+        self.feat_var = tf.reduce_mean(tf.nn.moments(X_r, axes=[0])[1])
+        self.max_feat = tf.reduce_max(tf.abs(X_r))
 
-                def cond_all(x):
-                    return tf.concat([x, all_actions], 1)
-
-                next_state_marginals = []
-
-                for i in range(512):
-                    state = rgbep[i]
-                    state = tf.reshape(state, shape=(1, 3136))
-                    state_tiled = tf.tile(state, [self.ac_space.n, 1])
-                    X_r_hat = tf.nn.relu(fc(cond(state_tiled), 'fc1r_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
-                    X_r_hat = tf.nn.relu(fc(cond(X_r_hat), 'fc1r_hat2_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
-                    X_r_hat = fc(cond(X_r_hat), 'fc1r_hat3_pred', nh=rep_size, init_scale=np.sqrt(2))
-                    X_r_hat = tf.reduce_mean(X_r_hat, axis=0)
-                    next_state_marginal = tf.stop_gradient(X_r_hat)
-                    next_state_marginals.append(next_state_marginal)
-
-                next_state_marginals = tf.convert_to_tensor(next_state_marginals)
-                print(next_state_marginals.shape)
-
-                # The next states are X_r and the next state marginals
-                # Run these through the statistics network
-
-                # Statistics network
-                next_state = tf.stop_gradient(X_r)
-
-                p_sa = tf.nn.relu(fc(cond(next_state), 'stats_hat1_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
-                p_sa = tf.nn.relu(fc(p_sa, 'stats_hat2_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
-                p_sa = fc(cond(p_sa), 'stats_hat3_pred', nh=1, init_scale=np.sqrt(2))
-
-                p_s_a = tf.nn.relu(fc(cond(next_state_marginals), 'stats_hat1_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
-                p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat2_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
-                p_s_a = fc(cond(p_s_a), 'stats_hat3_pred', nh=1, init_scale=np.sqrt(2))
-
-
-        self.int_rew = tf.reduce_mean(tf.stop_gradient(p_sa) - tf.log((tf.exp(tf.stop_gradient(p_s_a)))),
-                                              axis=-1, keep_dims=True)
-        self.lower_bound = tf.reduce_mean(tf.nn.softplus(-p_sa)) - tf.reduce_mean(tf.nn.softplus(p_s_a))
+        self.lower_bound = tf.reduce_mean(p_sa) - tf.log(tf.reduce_mean(tf.exp(p_s_a)))
+        self.int_rew = p_sa - tf.log(tf.exp(p_s_a))
         self.int_rew = tf.reshape(self.int_rew, (self.sy_nenvs, self.sy_nsteps - 1))
-        noisy_targets = tf.stop_gradient(X_r)
-        # self.aux_loss = tf.reduce_mean(tf.square(noisy_targets-X_r_hat))
-        self.aux_loss = tf.reduce_mean(tf.square(noisy_targets - X_r_hat), -1) - self.lower_bound
+        self.aux_loss = -self.lower_bound
+
         mask = tf.random_uniform(shape=tf.shape(self.aux_loss), minval=0., maxval=1., dtype=tf.float32)
         mask = tf.cast(mask < self.proportion_of_exp_used_for_predictor_update, tf.float32)
-        self.aux_loss = tf.reduce_sum(mask * self.aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
+
+        #self.aux_loss = tf.reduce_sum(mask * self.aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
 
     def define_dynamics_prediction_rew(self, convfeat, rep_size, enlargement):
         #Dynamics loss with random features.
