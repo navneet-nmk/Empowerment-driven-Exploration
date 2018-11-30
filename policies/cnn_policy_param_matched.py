@@ -225,7 +225,7 @@ class CnnPolicy(StochasticPolicy):
         assert ac_one_hot.get_shape().as_list() == [None, None, self.ac_space.n], ac_one_hot.get_shape().as_list()
         ac_one_hot = tf.reshape(ac_one_hot, (-1, self.ac_space.n))
 
-        def cond(x, shuffle=False):
+        def cond(x, y, shuffle=False):
             if shuffle:
                 new_actions = tf.random_shuffle(self.ph_ac)
                 ac_one_hot_shuffled = tf.one_hot(new_actions, self.ac_space.n, axis=2)
@@ -233,10 +233,10 @@ class CnnPolicy(StochasticPolicy):
                 assert ac_one_hot_shuffled.get_shape().as_list() == [None, None,
                                                             self.ac_space.n], ac_one_hot_shuffled.get_shape().as_list()
                 ac_one_hot_shuffled = tf.reshape(ac_one_hot_shuffled, (-1, self.ac_space.n))
-                return tf.concat([x, ac_one_hot_shuffled], 1)
+                return tf.concat([x, y, ac_one_hot_shuffled], 1)
 
             else:
-                return tf.concat([x, ac_one_hot], 1)
+                return tf.concat([x, y, ac_one_hot], 1)
 
 
         # Empowerment value with random features
@@ -245,6 +245,19 @@ class CnnPolicy(StochasticPolicy):
         for ph in self.ph_ob.values():
             if len(ph.shape.as_list()) == 5: # B, T, H, W, C
                 logger.info("CnnTarget: using '%s' shape %s as image input" % (ph.name, str(ph.shape)))
+
+                current_states = ph[:, :-1]
+                current_states = tf.cast(current_states, tf.float32)
+                current_states = tf.reshape(current_states,  (-1, *ph.shape.as_list()[-3:]))[:, :, :, -1:]
+                current_states = tf.clip_by_value((current_states - self.ph_mean) / self.ph_std, -5.0, 5.0)
+                cr = tf.nn.leaky_relu(conv(current_states, 'c1r', nf=convfeat * 1, rf=8, stride=4, init_scale=np.sqrt(2)))
+                cr = tf.nn.leaky_relu(conv(cr, 'c2r', nf=convfeat * 2 * 1, rf=4, stride=2, init_scale=np.sqrt(2)))
+                cr = tf.nn.leaky_relu(conv(cr, 'c3r', nf=convfeat * 2 * 1, rf=3, stride=1, init_scale=np.sqrt(2)))
+                rgbcr = [to2d(cr)]
+                # The current states
+                X_c_r = fc(rgbcr[0], 'fc1r', nh=rep_size, init_scale=np.sqrt(2))
+
+                # The next states
                 xr = ph[:, 1:]
                 xr = tf.cast(xr, tf.float32)
                 xr = tf.reshape(xr, (-1, *ph.shape.as_list()[-3:]))[:, :, :, -1:]
@@ -256,7 +269,7 @@ class CnnPolicy(StochasticPolicy):
                 rgbr = [to2d(xr)]
                 X_r = fc(rgbr[0], 'fc1r', nh=rep_size, init_scale=np.sqrt(2))
 
-                # Get every fourth state
+                # Get every eight state
                 X_finals = X_r[::8]
                 X_finals = X_finals[1:]
                 final_s = X_r[-1]
@@ -264,18 +277,18 @@ class CnnPolicy(StochasticPolicy):
                 X_finals = tf.concat([X_finals, final_s], axis=0)
                 X_finals = tf.tile(X_finals, multiples=[1, 8])
                 X_f = tf.reshape(X_finals, shape=(-1, 512))
-                print(X_f.shape)
 
                 # Statistics network
                 next_states = tf.stop_gradient(X_r)
-                final_state = tf.stop_gradient(X_f)
+                final_states = tf.stop_gradient(X_f)
+                current_states = tf.stop_gradient(X_c_r)
 
-                p_sa = tf.nn.relu(fc(cond(final_state), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+                p_sa = tf.nn.relu(fc(cond(final_states, current_states), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
                 p_sa = tf.nn.relu(fc(p_sa, 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
                 p_sa = tf.nn.relu(fc(p_sa, 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
                 p_sa = fc(p_sa, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
 
-                p_s_a = tf.nn.relu(fc(cond(final_state, shuffle=True), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+                p_s_a = tf.nn.relu(fc(cond(final_states, current_states, shuffle=True), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
                 p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
                 p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
                 p_s_a = fc(p_s_a, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
@@ -303,7 +316,6 @@ class CnnPolicy(StochasticPolicy):
         negative_expectation = tf.reduce_mean(negative_expectation)
 
         self.lower_bound = positive_expectation-negative_expectation
-
 
         self.aux_loss = -self.lower_bound
 
