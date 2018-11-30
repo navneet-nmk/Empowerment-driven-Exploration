@@ -1,4 +1,5 @@
 import numpy as np
+import math
 import tensorflow as tf
 from baselines import logger
 from utils import fc, conv, ortho_init
@@ -160,7 +161,7 @@ class CnnPolicy(StochasticPolicy):
             if len(ph.shape.as_list()) == 5:  # B,T,H,W,C
                 logger.info("CnnTarget: using '%s' shape %s as image input" % (ph.name, str(ph.shape)))
 
-                xr = ph[:,1:]
+                xr = ph[:, 1:]
                 xr = tf.cast(xr, tf.float32)
                 xr = tf.reshape(xr, (-1, *ph.shape.as_list()[-3:]))[:, :, :, -1:]
                 xr = tf.clip_by_value((xr - self.ph_mean) / self.ph_std, -5.0, 5.0)
@@ -175,7 +176,7 @@ class CnnPolicy(StochasticPolicy):
         for ph in self.ph_ob.values():
             if len(ph.shape.as_list()) == 5:  # B,T,H,W,C
                 logger.info("CnnTarget: using '%s' shape %s as image input" % (ph.name, str(ph.shape)))
-                xrp = ph[:,1:]
+                xrp = ph[:, 1:]
                 xrp = tf.cast(xrp, tf.float32)
                 xrp = tf.reshape(xrp, (-1, *ph.shape.as_list()[-3:]))[:, :, :, -1:]
                 xrp = tf.clip_by_value((xrp - self.ph_mean) / self.ph_std, -5.0, 5.0)
@@ -218,6 +219,26 @@ class CnnPolicy(StochasticPolicy):
 
         logger.info("Using Empowerment BONUS ****************************************************")
 
+        # Make the one hot encoding of the action to add to the state
+        ac_one_hot = tf.one_hot(self.ph_ac, self.ac_space.n, axis=2)
+        assert ac_one_hot.get_shape().ndims == 3
+        assert ac_one_hot.get_shape().as_list() == [None, None, self.ac_space.n], ac_one_hot.get_shape().as_list()
+        ac_one_hot = tf.reshape(ac_one_hot, (-1, self.ac_space.n))
+
+        def cond(x, shuffle=False):
+            if shuffle:
+                new_actions = tf.random_shuffle(self.ph_ac)
+                ac_one_hot_shuffled = tf.one_hot(new_actions, self.ac_space.n, axis=2)
+                assert ac_one_hot_shuffled.get_shape().ndims == 3
+                assert ac_one_hot_shuffled.get_shape().as_list() == [None, None,
+                                                            self.ac_space.n], ac_one_hot_shuffled.get_shape().as_list()
+                ac_one_hot_shuffled = tf.reshape(ac_one_hot_shuffled, (-1, self.ac_space.n))
+                return tf.concat([x, ac_one_hot_shuffled], 1)
+
+            else:
+                return tf.concat([x, ac_one_hot], 1)
+
+
         # Empowerment value with random features
 
         # Calculate the feature embedding for the next states
@@ -235,50 +256,61 @@ class CnnPolicy(StochasticPolicy):
                 rgbr = [to2d(xr)]
                 X_r = fc(rgbr[0], 'fc1r', nh=rep_size, init_scale=np.sqrt(2))
 
-        X_final = X_r[-1]
-        X_f_zeros = tf.zeros_like(X_r)
-        X_f = X_final + X_f_zeros
-        print(X_f.shape)
+                # Get every fourth state
+                X_finals = X_r[::8]
+                X_finals = X_finals[1:]
+                final_s = X_r[-1]
+                final_s = tf.reshape(final_s, shape=(1, 512))
+                X_finals = tf.concat([X_finals, final_s], axis=0)
+                X_finals = tf.tile(X_finals, multiples=[1, 8])
+                X_f = tf.reshape(X_finals, shape=(-1, 512))
+                print(X_f.shape)
 
-        # Predictor network. - Calculate the feature embedding for the prediction of the current state + action
+                # Statistics network
+                next_states = tf.stop_gradient(X_r)
+                final_state = tf.stop_gradient(X_f)
 
-        # Make the one hot encoding of the action to add to the state
-        ac_one_hot = tf.one_hot(self.ph_ac, self.ac_space.n, axis=2)
-        assert ac_one_hot.get_shape().ndims == 3
-        assert ac_one_hot.get_shape().as_list() == [None, None, self.ac_space.n], ac_one_hot.get_shape().as_list()
-        ac_one_hot = tf.reshape(ac_one_hot, (-1, self.ac_space.n))
+                p_sa = tf.nn.relu(fc(cond(final_state), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+                p_sa = tf.nn.relu(fc(p_sa, 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
+                p_sa = tf.nn.relu(fc(p_sa, 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
+                p_sa = fc(p_sa, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
 
-        def cond(x):
-            return tf.concat([x, ac_one_hot], 1)
-
-        # Empowerment calculation
-
-        # Statistics network
-        next_states = tf.stop_gradient(X_r)
-        final_state = tf.stop_gradient(X_f)
-
-        p_sa = tf.nn.relu(fc(cond(final_state), 'stats_hat1_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
-        p_sa = tf.nn.relu(fc(p_sa, 'stats_hat2_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
-        p_sa = tf.nn.relu(fc(p_sa, 'stats_hat3_pred', nh=32 * enlargement, init_scale=np.sqrt(2)))
-        p_sa = fc(p_sa, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
-
-        p_s_a = tf.nn.relu(fc(cond(next_states), 'stats_hat1_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
-        p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat2_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
-        p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat3_pred', nh=32 * enlargement, init_scale=np.sqrt(2)))
-        p_s_a = fc(p_s_a, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
+                p_s_a = tf.nn.relu(fc(cond(final_state, shuffle=True), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+                p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
+                p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
+                p_s_a = fc(p_s_a, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
 
         self.feat_var = tf.reduce_mean(tf.nn.moments(X_r, axes=[0])[1])
         self.max_feat = tf.reduce_max(tf.abs(X_r))
 
-        self.lower_bound = tf.reduce_mean(p_sa) - tf.log(tf.reduce_mean(tf.exp(p_s_a)))
-        self.int_rew = p_sa - tf.log(tf.exp(p_s_a))
+        log_2 = math.log(2.)
+        positive_expectation = log_2 - tf.nn.softplus(-tf.stop_gradient(p_sa))
+        negative_expectation = tf.nn.softplus(-tf.stop_gradient(p_s_a))+tf.stop_gradient(p_s_a)-log_2
+
+        self.int_rew = positive_expectation - negative_expectation
+        #self.int_rew = tf.stop_gradient(p_sa) - tf.log(tf.exp(tf.stop_gradient(p_s_a)))
         self.int_rew = tf.reshape(self.int_rew, (self.sy_nenvs, self.sy_nsteps - 1))
+
+
+        # Using the JSD for the lower bound calculation (since this will not be unbounded compared to the KL divergence)
+        #self.lower_bound = tf.reduce_mean(p_sa) - tf.log(tf.reduce_mean(tf.exp(p_s_a)))
+
+        log_2 = math.log(2.)
+        positive_expectation = log_2 - tf.nn.softplus(-p_sa)
+        negative_expectation = tf.nn.softplus(-p_s_a)+p_s_a-log_2
+
+        positive_expectation = tf.reduce_mean(positive_expectation)
+        negative_expectation = tf.reduce_mean(negative_expectation)
+
+        self.lower_bound = positive_expectation-negative_expectation
+
+
         self.aux_loss = -self.lower_bound
 
         mask = tf.random_uniform(shape=tf.shape(self.aux_loss), minval=0., maxval=1., dtype=tf.float32)
         mask = tf.cast(mask < self.proportion_of_exp_used_for_predictor_update, tf.float32)
 
-        #self.aux_loss = tf.reduce_sum(mask * self.aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
+        self.aux_loss = tf.reduce_sum(mask * self.aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
 
     def define_dynamics_prediction_rew(self, convfeat, rep_size, enlargement):
         #Dynamics loss with random features.
