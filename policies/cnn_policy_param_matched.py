@@ -269,7 +269,7 @@ class CnnPolicy(StochasticPolicy):
                 rgbr = [to2d(xr)]
                 X_r = fc(rgbr[0], 'fc1r', nh=rep_size, init_scale=np.sqrt(2))
 
-                # Get every eight state
+                # Get every fourth state
                 X_finals = X_r[::8]
                 X_finals = X_finals[1:]
                 final_s = X_r[-1]
@@ -279,16 +279,19 @@ class CnnPolicy(StochasticPolicy):
                 X_f = tf.reshape(X_finals, shape=(-1, 512))
 
                 # Statistics network
-                next_states = tf.stop_gradient(X_r)
+                next_states = tf.stop_gradient((X_r))
+                next_shuffled_states = tf.stop_gradient(tf.random_shuffle(X_r))
+
                 final_states = tf.stop_gradient(X_f)
                 current_states = tf.stop_gradient(X_c_r)
 
+                # Random shuffle the next states
                 p_sa = tf.nn.relu(fc(cond(final_states, current_states), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
                 p_sa = tf.nn.relu(fc(p_sa, 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
                 p_sa = tf.nn.relu(fc(p_sa, 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
                 p_sa = fc(p_sa, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
 
-                p_s_a = tf.nn.relu(fc(cond(final_states, current_states, shuffle=True), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+                p_s_a = tf.nn.relu(fc(cond(next_shuffled_states, current_states), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
                 p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
                 p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
                 p_s_a = fc(p_s_a, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
@@ -300,10 +303,17 @@ class CnnPolicy(StochasticPolicy):
         positive_expectation = log_2 - tf.nn.softplus(-tf.stop_gradient(p_sa))
         negative_expectation = tf.nn.softplus(-tf.stop_gradient(p_s_a))+tf.stop_gradient(p_s_a)-log_2
 
-        self.int_rew = positive_expectation - negative_expectation
-        #self.int_rew = tf.stop_gradient(p_sa) - tf.log(tf.exp(tf.stop_gradient(p_s_a)))
-        self.int_rew = tf.reshape(self.int_rew, (self.sy_nenvs, self.sy_nsteps - 1))
+        def log_sum_exp(x, axis=None):
+            x_max = tf.maximum(x, axis)[0]
+            y = tf.log(tf.reduce_sum(tf.exp(x - x_max), axis=axis)) + x_max
+            return y
 
+        # Donsker-Varadhan representation for the reward
+        positive_expectation = p_sa
+        negative_expectation = log_sum_exp(p_s_a, 0) - tf.log(4096.)
+
+        self.int_rew = positive_expectation - negative_expectation
+        self.int_rew = tf.reshape(self.int_rew, (self.sy_nenvs, self.sy_nsteps - 1))
 
         # Using the JSD for the lower bound calculation (since this will not be unbounded compared to the KL divergence)
         #self.lower_bound = tf.reduce_mean(p_sa) - tf.log(tf.reduce_mean(tf.exp(p_s_a)))
@@ -315,14 +325,14 @@ class CnnPolicy(StochasticPolicy):
         positive_expectation = tf.reduce_mean(positive_expectation)
         negative_expectation = tf.reduce_mean(negative_expectation)
 
-        self.lower_bound = positive_expectation-negative_expectation
+        self.lower_bound = positive_expectation - negative_expectation
 
         self.aux_loss = -self.lower_bound
 
         mask = tf.random_uniform(shape=tf.shape(self.aux_loss), minval=0., maxval=1., dtype=tf.float32)
         mask = tf.cast(mask < self.proportion_of_exp_used_for_predictor_update, tf.float32)
 
-        self.aux_loss = tf.reduce_sum(mask * self.aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
+        #self.aux_loss = tf.reduce_sum(mask * self.aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
 
     def define_dynamics_prediction_rew(self, convfeat, rep_size, enlargement):
         #Dynamics loss with random features.
