@@ -60,11 +60,15 @@ class CnnPolicy(StochasticPolicy):
         pdparamsize = self.pdtype.param_shape()[0]
         self.memsize = memsize
 
+        self.ac_size = pdparamsize
+        self.mem = memsize
+        self.hid = hidsize
+
         #Inputs to policy and value function will have different shapes depending on whether it is rollout
         #or optimization time, so we treat separately.
 
         # Optimization time
-        self.pdparam_opt, self.vpred_int_opt, self.vpred_ext_opt, self.snext_opt = \
+        self.pdparam_opt, self.vpred_int_opt, self.vpred_ext_opt, self.snext_opt, self.vpred_emp_opt = \
             self.apply_policy(self.ph_ob[None][:,:-1],
                               reuse=False,
                               scope=scope,
@@ -77,7 +81,7 @@ class CnnPolicy(StochasticPolicy):
                               )
 
         # Rollout time
-        self.pdparam_rollout, self.vpred_int_rollout, self.vpred_ext_rollout, self.snext_rollout = \
+        self.pdparam_rollout, self.vpred_int_rollout, self.vpred_ext_rollout, self.snext_rollout, self.vpred_emp_rollout = \
             self.apply_policy(self.ph_ob[None],
                               reuse=True,
                               scope=scope,
@@ -104,8 +108,7 @@ class CnnPolicy(StochasticPolicy):
 
         self.ph_istate = ph_istate
 
-    @staticmethod
-    def apply_policy(ph_ob, reuse, scope, hidsize, memsize, extrahid, sy_nenvs, sy_nsteps, pdparamsize):
+    def apply_source_policy(self, ph_ob, scope, reuse, hidsize, pdparamsize):
 
         data_format = 'NHWC'
         ph = ph_ob
@@ -122,9 +125,46 @@ class CnnPolicy(StochasticPolicy):
 
         with tf.variable_scope(scope, reuse=reuse), tf.device('/gpu:0' if yes_gpu else '/cpu:0'):
 
-            X = activ(conv(X, 'c1', nf=32, rf=8, stride=4, init_scale=np.sqrt(2), data_format=data_format))
-            X = activ(conv(X, 'c2', nf=64, rf=4, stride=2, init_scale=np.sqrt(2), data_format=data_format))
-            X = activ(conv(X, 'c3', nf=64, rf=4, stride=1, init_scale=np.sqrt(2), data_format=data_format))
+            X = activ(conv(X, 'sourcec1', nf=32, rf=8, stride=4, init_scale=np.sqrt(2), data_format=data_format))
+            X = activ(conv(X, 'sourcec2', nf=64, rf=4, stride=2, init_scale=np.sqrt(2), data_format=data_format))
+            X = activ(conv(X, 'sourcec3', nf=64, rf=4, stride=1, init_scale=np.sqrt(2), data_format=data_format))
+
+            X = to2d(X)
+
+            mix_other_observations = [X]
+            X = tf.concat(mix_other_observations, axis=1)
+            X = activ(fc(X, 'sourcefc1', nh=hidsize, init_scale=np.sqrt(2)))
+
+            additional_size = 448
+            X = activ(fc(X, 'sourcefc_additional', nh=additional_size, init_scale=np.sqrt(2)))
+
+            actions = X + activ(fc(X, 'sourcefc2act', nh=additional_size, init_scale=0.1))
+            pdparam = fc(actions, 'sourcepd', nh=pdparamsize, init_scale=0.01)
+
+
+        return pdparam
+
+
+    @staticmethod
+    def apply_policy(ph_ob, reuse, scope, hidsize, memsize, extrahid, sy_nenvs, sy_nsteps, pdparamsize):
+
+        ph = ph_ob
+        assert len(ph.shape.as_list()) == 2  # B, R
+
+        logger.info("CnnPolicy: using '%s' shape %s as image input" % (ph.name, str(ph.shape)))
+        # Normalize
+        X = tf.cast(ph, tf.float32) / 255.
+
+        X = tf.reshape(X, (-1, *ph.shape.as_list()[-3:]))
+
+        activ = tf.nn.relu
+        yes_gpu = any(get_available_gpus())
+
+        with tf.variable_scope(scope, reuse=reuse), tf.device('/gpu:0' if yes_gpu else '/cpu:0'):
+
+            X = activ(conv(X, 'c1', nf=32, rf=8, stride=4, init_scale=np.sqrt(2)))
+            X = activ(conv(X, 'c2', nf=64, rf=4, stride=2, init_scale=np.sqrt(2)))
+            X = activ(conv(X, 'c3', nf=64, rf=4, stride=1, init_scale=np.sqrt(2)))
 
             X = to2d(X)
 
@@ -141,15 +181,17 @@ class CnnPolicy(StochasticPolicy):
             Xtout = tf.concat(mix_timeout, axis=1)
             if extrahid:
                 Xtout = X + activ(fc(Xtout, 'fc2val', nh=additional_size, init_scale=0.1))
-                X     = X + activ(fc(X, 'fc2act', nh=additional_size, init_scale=0.1))
+                X = X + activ(fc(X, 'fc2act', nh=additional_size, init_scale=0.1))
             pdparam = fc(X, 'pd', nh=pdparamsize, init_scale=0.01)
             vpred_int   = fc(Xtout, 'vf_int', nh=1, init_scale=0.01)
+            vpred_empowerment = fc(Xtout, 'vf_empowerment', nh=1, init_scale=0.01)
             vpred_ext   = fc(Xtout, 'vf_ext', nh=1, init_scale=0.01)
 
             pdparam = tf.reshape(pdparam, (sy_nenvs, sy_nsteps, pdparamsize))
             vpred_int = tf.reshape(vpred_int, (sy_nenvs, sy_nsteps))
             vpred_ext = tf.reshape(vpred_ext, (sy_nenvs, sy_nsteps))
-        return pdparam, vpred_int, vpred_ext, snext
+            vpred_empowerment = tf.reshape(vpred_empowerment, (sy_nenvs, sy_nsteps))
+        return pdparam, vpred_int, vpred_ext, snext, vpred_empowerment
 
     def define_self_prediction_rew(self, convfeat, rep_size, enlargement):
         logger.info("Using RND BONUS ****************************************************")
@@ -208,6 +250,81 @@ class CnnPolicy(StochasticPolicy):
         print(ac_one_hot.shape)
         return ac_one_hot
 
+    def calculate_n_step_empowerment(self, observations, pdparamsize, scope,
+                                     reuse, enlargement, convfeat, rep_size,  k=5):
+        # Calculate the next states for the next k actions and calculate the resulting empowerment
+
+        # Follow the source policy for k steps and get the resulting state using the
+        # learnt dynamics model.
+
+        all_actions = []
+        final_observations = None
+
+        for i in range(k):
+            # Calculate the actions using the source policy
+            actions = self.apply_source_policy(ph_ob=observations, scope=scope, reuse=reuse,
+                                                pdparamsize=pdparamsize, hidsize=self.hid)
+            all_actions.append(actions)
+            # Get the next states
+            next_observations = self.apply_forward_dynamics_model(observations, actions,
+                                                                  enlargement=enlargement, convfeat=convfeat,
+                                                                  rep_size=rep_size)
+
+            final_observations = next_observations
+            observations = next_observations
+
+
+
+        # We then get the (state, [actions], resulting state) tuples.
+
+        # The above calculated tuples are from the joint distribution.
+
+        # We then keep the actions same but randomly select some other next states(conditioned on the current state).
+
+        # We then use these samples to calculate the mutual information using the mutual information neural
+        # estimation. (Ideally, we should use Jenson-Shannon divergence to avoid the unbounded nature of
+        # Mutual Information). This mutual information is then used as the intrinisic reward for the agent.
+
+        # Note: We are using both the RND bonus and the empowerment to influence the value function of a state.
+
+        # We then optimize the statistics network and consequently the source policy.
+
+        # We then optimize the forward dynamics model.
+
+
+        pass
+
+    def apply_forward_dynamics_model(self, observation, ac, enlargement, convfeat, rep_size):
+        # Dynamics loss with random features.
+
+        # Predictor network.
+
+        # Make the one hot encoding of the action to add to the state
+        ac_one_hot = tf.one_hot(ac, self.ac_space.n, axis=2)
+        assert ac_one_hot.get_shape().ndims == 3
+        assert ac_one_hot.get_shape().as_list() == [None, None, self.ac_space.n], ac_one_hot.get_shape().as_list()
+        ac_one_hot = tf.reshape(ac_one_hot, (-1, self.ac_space.n))
+
+        def cond(x):
+            return tf.concat([x, ac_one_hot], 1)
+
+        xrp = observation
+        # ph_mean, ph_std are 84x84x1, so we subtract the average of the last channel from all channels. Is this ok?
+        xrp = tf.clip_by_value((xrp - self.ph_mean) / self.ph_std, -5.0, 5.0)
+
+        xrp = tf.nn.leaky_relu(conv(xrp, 'c1rp_pred', nf=convfeat, rf=8, stride=4, init_scale=np.sqrt(2)))
+        xrp = tf.nn.leaky_relu(conv(xrp, 'c2rp_pred', nf=convfeat * 2, rf=4, stride=2, init_scale=np.sqrt(2)))
+        xrp = tf.nn.leaky_relu(conv(xrp, 'c3rp_pred', nf=convfeat * 2, rf=3, stride=1, init_scale=np.sqrt(2)))
+        rgbrp = to2d(xrp)
+
+        # X_r_hat = tf.nn.relu(fc(rgb[0], 'fc1r_hat1', nh=256 * enlargement, init_scale=np.sqrt(2)))
+        X_r_hat = tf.nn.relu(fc(cond(rgbrp), 'fc1r_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+        X_r_hat = tf.nn.relu(fc(cond(X_r_hat), 'fc1r_hat2_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+        # X_r_hat is the next state in the representation size
+        X_r_hat = fc(cond(X_r_hat), 'fc1r_hat3_pred', nh=rep_size, init_scale=np.sqrt(2))
+
+        return X_r_hat
+
     def define_empowerment_prediction_rew(self, convfeat, rep_size, enlargement):
         '''
 
@@ -218,6 +335,7 @@ class CnnPolicy(StochasticPolicy):
         '''
 
         logger.info("Using Empowerment BONUS ****************************************************")
+        logger.info("Calculating 4 step empowerment *********************************************")
 
         # Make the one hot encoding of the action to add to the state
         ac_one_hot = tf.one_hot(self.ph_ac, self.ac_space.n, axis=2)
@@ -413,7 +531,8 @@ class CnnPolicy(StochasticPolicy):
         feed1.update({self.ph_mean: self.ob_rms.mean, self.ph_std: self.ob_rms.var ** 0.5})
         # for f in feed1:
         #     print(f)
-        a, vpred_int,vpred_ext, nlp, newstate, ent = tf.get_default_session().run(
-            [self.a_samp, self.vpred_int_rollout,self.vpred_ext_rollout, self.nlp_samp, self.snext_rollout, self.entropy_rollout],
+        a, vpred_int,vpred_ext, vpred_emp, nlp, newstate, ent = tf.get_default_session().run(
+            [self.a_samp, self.vpred_int_rollout, self.vpred_ext_rollout, self.vpred_emp_rollout,
+             self.nlp_samp, self.snext_rollout, self.entropy_rollout],
             feed_dict={**feed1, **feed2})
-        return a[:,0], vpred_int[:,0],vpred_ext[:,0], nlp[:,0], newstate, ent[:,0]
+        return a[:,0], vpred_int[:,0],vpred_ext[:,0], vpred_emp[:,0], nlp[:,0], newstate, ent[:,0]
