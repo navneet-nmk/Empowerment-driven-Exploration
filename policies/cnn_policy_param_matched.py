@@ -250,7 +250,7 @@ class CnnPolicy(StochasticPolicy):
         print(ac_one_hot.shape)
         return ac_one_hot
 
-    def calculate_n_step_empowerment(self, observations, pdparamsize, scope,
+    def calculate_n_step_empowerment(self, observations, next_observations, pdparamsize, scope,
                                      reuse, enlargement, convfeat, rep_size,  k=5):
         # Calculate the next states for the next k actions and calculate the resulting empowerment
 
@@ -260,11 +260,20 @@ class CnnPolicy(StochasticPolicy):
         all_actions = []
         final_observations = None
 
+
+
         for i in range(k):
             # Calculate the actions using the source policy
             actions = self.apply_source_policy(ph_ob=observations, scope=scope, reuse=reuse,
                                                 pdparamsize=pdparamsize, hidsize=self.hid)
-            all_actions.append(actions)
+
+            # Convert the actions to one-hot encoding
+            ac_one_hot = tf.one_hot(actions, self.ac_space.n, axis=2)
+            assert ac_one_hot.get_shape().ndims == 3
+            assert ac_one_hot.get_shape().as_list() == [None, None, self.ac_space.n], ac_one_hot.get_shape().as_list()
+            ac_one_hot = tf.reshape(ac_one_hot, (-1, self.ac_space.n))
+
+            all_actions.append(ac_one_hot)
             # Get the next states
             next_observations = self.apply_forward_dynamics_model(observations, actions,
                                                                   enlargement=enlargement, convfeat=convfeat,
@@ -277,22 +286,59 @@ class CnnPolicy(StochasticPolicy):
 
         # We then get the (state, [actions], resulting state) tuples.
 
+        all_actions = tf.concat(all_actions, axis=-1)
+
+        def cond(x):
+            return tf.concat([x, all_actions], 1)
+
+        # So we have the states, actions, and the final_states
+
         # The above calculated tuples are from the joint distribution.
 
-        # We then keep the actions same but randomly select some other next states(conditioned on the current state).
+        # Statistics network
+
+        # Random shuffle the next states
+        p_sa = tf.nn.relu(
+            fc(cond(final_observations), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+        p_sa = tf.nn.relu(fc(p_sa, 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
+        p_sa = tf.nn.relu(fc(p_sa, 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
+        p_sa = fc(p_sa, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
+
+        p_s_a = tf.nn.relu(fc(cond(next_observations), 'stats_hat1_pred', nh=256 * enlargement,
+                              init_scale=np.sqrt(2)))
+        p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
+        p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
+        p_s_a = fc(p_s_a, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
 
         # We then use these samples to calculate the mutual information using the mutual information neural
         # estimation. (Ideally, we should use Jenson-Shannon divergence to avoid the unbounded nature of
         # Mutual Information). This mutual information is then used as the intrinisic reward for the agent.
 
-        # Note: We are using both the RND bonus and the empowerment to influence the value function of a state.
+        log_2 = math.log(2.)
+        positive_expectation = log_2 - tf.nn.softplus(-tf.stop_gradient(p_sa))
+        negative_expectation = tf.nn.softplus(-tf.stop_gradient(p_s_a)) + tf.stop_gradient(p_s_a) - log_2
 
-        # We then optimize the statistics network and consequently the source policy.
+        def log_sum_exp(x, axis=None):
+            x_max = tf.maximum(x, axis)[0]
+            y = tf.log(tf.reduce_sum(tf.exp(x - x_max), axis=axis)) + x_max
+            return y
 
-        # We then optimize the forward dynamics model.
+        int_rew = positive_expectation - negative_expectation
+        int_rew = tf.reshape(int_rew, (self.sy_nenvs, self.sy_nsteps - 1))
 
+        # Using the JSD for the lower bound calculation (since this will not be unbounded compared to the KL divergence)
+        # self.lower_bound = tf.reduce_mean(p_sa) - tf.log(tf.reduce_mean(tf.exp(p_s_a)))
 
-        pass
+        log_2 = math.log(2.)
+        positive_expectation = log_2 - tf.nn.softplus(-p_sa)
+        negative_expectation = tf.nn.softplus(-p_s_a) + p_s_a - log_2
+
+        positive_expectation = tf.reduce_mean(positive_expectation)
+        negative_expectation = tf.reduce_mean(negative_expectation)
+
+        lower_bound = positive_expectation - negative_expectation
+
+        return int_rew, lower_bound
 
     def apply_forward_dynamics_model(self, observation, ac, enlargement, convfeat, rep_size):
         # Dynamics loss with random features.
