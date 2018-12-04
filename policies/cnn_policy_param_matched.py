@@ -371,7 +371,73 @@ class CnnPolicy(StochasticPolicy):
 
         return X_r_hat
 
-    def define_empowerment_prediction_rew(self, convfeat, rep_size, enlargement):
+    def train_forward_dynamics_network(self, convfeat, rep_size, enlargement):
+        #Dynamics loss with random features.
+
+        # Random target network.
+        for ph in self.ph_ob.values():
+            if len(ph.shape.as_list()) == 5:  # B,T,H,W,C
+                logger.info("CnnTarget: using '%s' shape %s as image input" % (ph.name, str(ph.shape)))
+                # Get the next states (i.e. leave out the first timestep)
+                xr = ph[:,1:]
+                xr = tf.cast(xr, tf.float32)
+                xr = tf.reshape(xr, (-1, *ph.shape.as_list()[-3:]))[:, :, :, -1:]
+                xr = tf.clip_by_value((xr - self.ph_mean) / self.ph_std, -5.0, 5.0)
+
+                xr = tf.nn.leaky_relu(conv(xr, 'c1r', nf=convfeat * 1, rf=8, stride=4, init_scale=np.sqrt(2)))
+                xr = tf.nn.leaky_relu(conv(xr, 'c2r', nf=convfeat * 2 * 1, rf=4, stride=2, init_scale=np.sqrt(2)))
+                xr = tf.nn.leaky_relu(conv(xr, 'c3r', nf=convfeat * 2 * 1, rf=3, stride=1, init_scale=np.sqrt(2)))
+                rgbr = [to2d(xr)]
+                X_r = fc(rgbr[0], 'fc1r', nh=rep_size, init_scale=np.sqrt(2))
+
+
+        # Random Source Network
+        for ph in self.ph_ob.values():
+            if len(ph.shape.as_list()) == 5:    #B,T,H,W,C
+                logger.info("CnnTarget: using '%s' shape %s as image input" % (ph.name, str(ph.shape)))
+                # Get the current states (i.e. leave out the first timestep)
+                xnr = ph[:, :-1]
+                xnr = tf.cast(xnr, tf.float32)
+                xnr = tf.reshape(xnr, (-1, *ph.shape.as_list()[-3:]))[:, :, :, -1:]
+                xnr = tf.clip_by_value((xnr - self.ph_mean) / self.ph_std, -5.0, 5.0)
+
+                xnr = tf.nn.leaky_relu(conv(xnr, 'c1r', nf=convfeat * 1, rf=8, stride=4, init_scale=np.sqrt(2)))
+                xnr = tf.nn.leaky_relu(conv(xnr, 'c2r', nf=convfeat * 2 * 1, rf=4, stride=2, init_scale=np.sqrt(2)))
+                xnr = tf.nn.leaky_relu(conv(xnr, 'c3r', nf=convfeat * 2 * 1, rf=3, stride=1, init_scale=np.sqrt(2)))
+                rgbnr = [to2d(xnr)]
+                X_nr = fc(rgbnr[0], 'fc1r', nh=rep_size, init_scale=np.sqrt(2))
+
+        # Predictor network.
+
+        # The predictor network takes in the random embedding of the current state
+        # and the action and tries to predict the random embedding of the next state.
+
+        # Make the one hot encoding of the action to add to the state
+        ac_one_hot = tf.one_hot(self.ph_ac, self.ac_space.n, axis=2)
+        assert ac_one_hot.get_shape().ndims == 3
+        assert ac_one_hot.get_shape().as_list() == [None, None, self.ac_space.n], ac_one_hot.get_shape().as_list()
+        ac_one_hot = tf.reshape(ac_one_hot, (-1, self.ac_space.n))
+        def cond(x):
+            return tf.concat([x, ac_one_hot], 1)
+
+        X_r_hat = tf.nn.relu(fc(cond(X_nr), 'fc1r_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+        X_r_hat = tf.nn.relu(fc(cond(X_r_hat), 'fc1r_hat2_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+        X_r_hat = fc(cond(X_r_hat), 'fc1r_hat3_pred', nh=rep_size, init_scale=np.sqrt(2))
+
+        self.feat_var = tf.reduce_mean(tf.nn.moments(X_r, axes=[0])[1])
+        self.max_feat = tf.reduce_max(tf.abs(X_r))
+
+        noisy_targets = tf.stop_gradient(X_r)
+        # self.aux_loss = tf.reduce_mean(tf.square(noisy_targets-X_r_hat))
+        aux_loss = tf.reduce_mean(tf.square(noisy_targets - X_r_hat), -1)
+        mask = tf.random_uniform(shape=tf.shape(aux_loss), minval=0., maxval=1., dtype=tf.float32)
+        mask = tf.cast(mask < self.proportion_of_exp_used_for_predictor_update, tf.float32)
+        aux_loss = tf.reduce_sum(mask * aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
+
+        return aux_loss
+
+
+    def define_empowerment_prediction_rew(self, convfeat, rep_size, enlargement, k=5):
         '''
 
         :param convfeat: Convolution feature size
@@ -381,7 +447,7 @@ class CnnPolicy(StochasticPolicy):
         '''
 
         logger.info("Using Empowerment BONUS ****************************************************")
-        logger.info("Calculating 4 step empowerment *********************************************")
+        logger.info("Calculating 5 step empowerment *********************************************")
 
         # Make the one hot encoding of the action to add to the state
         ac_one_hot = tf.one_hot(self.ph_ac, self.ac_space.n, axis=2)
