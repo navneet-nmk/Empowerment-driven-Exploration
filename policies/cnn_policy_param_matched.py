@@ -224,6 +224,14 @@ class CnnPolicy(StochasticPolicy):
         targets = tf.stop_gradient(X_r)
         # self.aux_loss = tf.reduce_mean(tf.square(noisy_targets-X_r_hat))
         self.aux_loss = tf.reduce_mean(tf.square(targets - X_r_hat), -1)
+
+        # Get the empowerment reward and the empowerment loss
+        loss, reward = self.define_empowerment_prediction_rew(convfeat=convfeat, rep_size=rep_size,
+                                                              enlargement=enlargement)
+
+        self.aux_loss += loss
+        self.empowerment_reward = reward
+
         mask = tf.random_uniform(shape=tf.shape(self.aux_loss), minval=0., maxval=1., dtype=tf.float32)
         mask = tf.cast(mask < self.proportion_of_exp_used_for_predictor_update, tf.float32)
         self.aux_loss = tf.reduce_sum(mask * self.aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
@@ -279,6 +287,10 @@ class CnnPolicy(StochasticPolicy):
         # Statistics network
 
         # Get the joint distribution of the current states, actions and the final states
+
+        # Stop the gradients from the final_states
+        final_states = tf.stop_gradient(final_states)
+
         p_sa = tf.nn.relu(
             fc(cond(final_states), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
         p_sa = tf.nn.relu(fc(p_sa, 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
@@ -293,8 +305,8 @@ class CnnPolicy(StochasticPolicy):
         p_s_a = fc(p_s_a, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
 
         # We then use these samples to calculate the mutual information using the mutual information neural
-        # estimation. (Ideally, we should use Jenson-Shannon divergence to avoid the unbounded nature of
-        # Mutual Information). This mutual information is then used as the intrinisic reward for the agent.
+        # estimation. (Ideally, we should use Jensen-Shannon divergence to avoid the unbounded nature of
+        # Mutual Information). This mutual information is then used as the intrinsic reward for the agent.
 
         log_2 = math.log(2.)
         positive_expectation = log_2 - tf.nn.softplus(-tf.stop_gradient(p_sa))
@@ -376,7 +388,6 @@ class CnnPolicy(StochasticPolicy):
 
         return aux_loss
 
-
     def define_empowerment_prediction_rew(self, convfeat, rep_size, enlargement, k=5):
         '''
 
@@ -425,24 +436,29 @@ class CnnPolicy(StochasticPolicy):
         self.feat_var = tf.reduce_mean(tf.nn.moments(X_r, axes=[0])[1])
         self.max_feat = tf.reduce_max(tf.abs(X_r))
 
+        current_states = tf.stop_gradient(X_c_r)
+        next_states = tf.stop_gradient(X_r)
+
         # Get the intrinsic reward and the lower bound loss
-        intrinsic_reward , lowerbound = self.calculate_n_step_empowerment(current_states=X_c_r,
-                                                                          next_states=X_r,
+        intrinsic_reward , lowerbound = self.calculate_n_step_empowerment(current_states=current_states,
+                                                                          next_states=next_states,
                                                                           enlargement=enlargement,
                                                                           pdparamsize=self.ac_size,
                                                                           rep_size=rep_size)
-
         self.empowerment_reward = intrinsic_reward
 
-        self.aux_loss = self.train_forward_dynamics_network(X_c_r, X_r, rep_size, enlargement)-lowerbound
+        aux_loss = self.train_forward_dynamics_network(X_c_r, X_r, rep_size, enlargement) - lowerbound
 
         mask = tf.random_uniform(shape=tf.shape(self.aux_loss), minval=0., maxval=1., dtype=tf.float32)
         mask = tf.cast(mask < self.proportion_of_exp_used_for_predictor_update, tf.float32)
         #self.aux_loss = tf.reduce_sum(mask * self.aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
 
+        return aux_loss, intrinsic_reward
+
     def define_dynamics_prediction_rew(self, convfeat, rep_size, enlargement):
-        #Dynamics loss with random features.
-        
+
+        # Dynamics loss with random features.
+
         # Random target network.
         for ph in self.ph_ob.values():
             if len(ph.shape.as_list()) == 5:  # B,T,H,W,C
@@ -476,6 +492,7 @@ class CnnPolicy(StochasticPolicy):
                 xrp = ph[:,:-1]
                 xrp = tf.cast(xrp, tf.float32)
                 xrp = tf.reshape(xrp, (-1, *ph.shape.as_list()[-3:]))
+
                 # ph_mean, ph_std are 84x84x1, so we subtract the average of the last channel from all channels. Is this ok?
                 xrp = tf.clip_by_value((xrp - self.ph_mean) / self.ph_std, -5.0, 5.0)
 
