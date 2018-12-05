@@ -303,7 +303,7 @@ class PpoAgent(object):
                 nextnew = self.I.buf_news[:, t + 1] if t + 1 < self.nsteps else self.I.buf_new_last
             else:
                 nextnew = 0.0 #No dones for empowerment reward.
-            nextvals = self.I.buf_vpreds_int[:, t + 1] if t + 1 < self.nsteps else self.I.buf_vpred_int_last
+            nextvals = self.I.buf_vpreds_emp[:, t + 1] if t + 1 < self.nsteps else self.I.buf_vpreds_emp_last
             nextnotnew = 1 - nextnew
             delta = rews_emp[:, t] + self.gamma * nextvals * nextnotnew - self.I.buf_vpreds_emp[:, t]
             self.I.buf_advs_emp[:, t] = lastgaelam = delta + self.gamma * self.lam * nextnotnew * lastgaelam
@@ -596,7 +596,6 @@ class PpoAgent(object):
                 self.I.stats['tcount'] += epinfo['l']
                 self.I.stats['rewtotal'] += epinfo['r']
                 # self.I.stats["best_ext_ret"] = self.best_ret
-
 
         return {'update' : update_info}
 
