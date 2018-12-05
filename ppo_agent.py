@@ -163,9 +163,9 @@ class PpoAgent(object):
             #Define loss.
             neglogpac = self.stochpol.pd_opt.neglogp(self.stochpol.ph_ac)
             entropy = tf.reduce_mean(self.stochpol.pd_opt.entropy())
-            vf_loss_int = (0.33 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_int_opt - self.ph_ret_int))
-            vf_loss_ext = (0.33 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_ext_opt - self.ph_ret_ext))
-            vf_loss_emp = (0.33 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_emp_opt - self.ph_ret_emp))
+            vf_loss_int = (0.3 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_int_opt - self.ph_ret_int))
+            vf_loss_ext = (0.5 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_ext_opt - self.ph_ret_ext))
+            vf_loss_emp = (0.2 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_emp_opt - self.ph_ret_emp))
             vf_loss = vf_loss_int + vf_loss_ext + vf_loss_emp
             ratio = tf.exp(self.ph_oldnlp - neglogpac) # p_new / p_old
             negadv = - self.ph_adv
@@ -262,20 +262,28 @@ class PpoAgent(object):
             logger.info(f"Gamma ext {self.gamma_ext}")
             logger.info(f"All scores {sorted(self.scores)}")
 
-
-        #Normalize intrinsic rewards.
+        # Normalize intrinsic rewards.
         rffs_int = np.array([self.I.rff_int.update(rew) for rew in self.I.buf_rews_int.T])
         self.I.rff_rms_int.update(rffs_int.ravel())
         rews_int = self.I.buf_rews_int / np.sqrt(self.I.rff_rms_int.var)
         self.mean_int_rew = np.mean(rews_int)
         self.max_int_rew = np.max(rews_int)
 
-        #Don't normalize extrinsic rewards.
+        # Normalize empowerment rewards
+        rffs_emp = np.array([self.I.rff_emp.update(rew) for rew in self.I.buf_rews_emp.T])
+        self.I.rff_rms_emp.update(rffs_emp.ravel())
+        rews_emp = self.I.buf_rews_emp / np.sqrt(self.I.rff_rms_emp.var)
+        self.mean_emp_rew = np.mean(rews_emp)
+        self.max_emp_rew = np.max(rews_emp)
+
+        # Don't normalize extrinsic rewards.
         rews_ext = self.I.buf_rews_ext
 
         rewmean, rewstd, rewmax = self.I.buf_rews_int.mean(), self.I.buf_rews_int.std(), np.max(self.I.buf_rews_int)
+        rewempmean, rewempstd, rewempmax = self.I.buf_rews_emp.mean(), \
+                                           self.I.buf_rews_emp.std(), np.max(self.I.buf_rews_emp)
 
-        #Calculate intrinsic returns and advantages.
+        # Calculate intrinsic returns and advantages.
         lastgaelam = 0
         for t in range(self.nsteps-1, -1, -1): # nsteps-2 ... 0
             if self.use_news:
@@ -288,7 +296,20 @@ class PpoAgent(object):
             self.I.buf_advs_int[:, t] = lastgaelam = delta + self.gamma * self.lam * nextnotnew * lastgaelam
         rets_int = self.I.buf_advs_int + self.I.buf_vpreds_int
 
-        #Calculate extrinsic returns and advantages.
+        # Calculate empowerment returns and advantages
+        lastgaelam = 0
+        for t in range(self.nsteps-1, -1, -1): # nsteps-2 ... 0
+            if self.use_news:
+                nextnew = self.I.buf_news[:, t + 1] if t + 1 < self.nsteps else self.I.buf_new_last
+            else:
+                nextnew = 0.0 #No dones for empowerment reward.
+            nextvals = self.I.buf_vpreds_int[:, t + 1] if t + 1 < self.nsteps else self.I.buf_vpred_int_last
+            nextnotnew = 1 - nextnew
+            delta = rews_emp[:, t] + self.gamma * nextvals * nextnotnew - self.I.buf_vpreds_emp[:, t]
+            self.I.buf_advs_emp[:, t] = lastgaelam = delta + self.gamma * self.lam * nextnotnew * lastgaelam
+        rets_emp = self.I.buf_advs_emp + self.I.buf_vpreds_emp
+
+        # Calculate extrinsic returns and advantages.
         lastgaelam = 0
         for t in range(self.nsteps-1, -1, -1): # nsteps-2 ... 0
             nextnew = self.I.buf_news[:, t + 1] if t + 1 < self.nsteps else self.I.buf_new_last
@@ -299,8 +320,8 @@ class PpoAgent(object):
             self.I.buf_advs_ext[:, t] = lastgaelam = delta + self.gamma_ext * self.lam * nextnotnew * lastgaelam
         rets_ext = self.I.buf_advs_ext + self.I.buf_vpreds_ext
 
-        #Combine the extrinsic and intrinsic advantages.
-        self.I.buf_advs = self.int_coeff*self.I.buf_advs_int + self.ext_coeff*self.I.buf_advs_ext
+        #Combine the extrinsic and intrinsic and empowerment advantages.
+        self.I.buf_advs = self.int_coeff*self.I.buf_advs_int + self.ext_coeff*self.I.buf_advs_ext + self.emp_coeff*self.I.buf_advs_emp
 
         #Collects info for reporting.
         info = dict(
@@ -310,6 +331,8 @@ class PpoAgent(object):
             retintstd  = rets_int.std(), # previously retstd
             retextmean = rets_ext.mean(), # previously not there
             retextstd  = rets_ext.std(), # previously not there
+            retempmean = rets_emp.mean(),
+            retempstd = rets_emp.std(),
             rewintmean_unnorm = rewmean, # previously rewmean
             rewintmax_unnorm = rewmax, # previously not there
             rewintmean_norm = self.mean_int_rew, # previously rewintmean
@@ -492,6 +515,14 @@ class PpoAgent(object):
             #Calcuate the intrinsic rewards for the rollout.
             fd = {}
             fd[self.stochpol.ph_ob[None]] = np.concatenate([self.I.buf_obs[None], self.I.buf_ob_last[None][:,None]], 1)
+            fd.update({self.stochpol.ph_mean: self.stochpol.ob_rms.mean,
+                       self.stochpol.ph_std: self.stochpol.ob_rms.var ** 0.5})
+            fd[self.stochpol.ph_ac] = self.I.buf_acs
+            self.I.buf_rews_int[:] = tf.get_default_session().run(self.stochpol.int_rew, fd)
+
+            # Calculate the empowerment rewards for the rollout.
+            fd = {}
+            fd[self.stochpol.ph_ob[None]] = np.concatenate([self.I.buf_obs[None], self.I.buf_ob_last[None][:, None]], 1)
             fd.update({self.stochpol.ph_mean: self.stochpol.ob_rms.mean,
                        self.stochpol.ph_std: self.stochpol.ob_rms.var ** 0.5})
             fd[self.stochpol.ph_ac] = self.I.buf_acs
