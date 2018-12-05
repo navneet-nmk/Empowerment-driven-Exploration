@@ -426,21 +426,23 @@ class CnnPolicy(StochasticPolicy):
         self.max_feat = tf.reduce_max(tf.abs(X_r))
 
         # Get the intrinsic reward and the lower bound loss
-        intrinsic_reward , lowerbound = self.calculate_n_step_empowerment()
+        intrinsic_reward , lowerbound = self.calculate_n_step_empowerment(current_states=X_c_r,
+                                                                          next_states=X_r,
+                                                                          enlargement=enlargement,
+                                                                          pdparamsize=self.ac_size,
+                                                                          rep_size=rep_size)
 
-        self.aux_loss = -lowerbound
+        self.empowerment_reward = intrinsic_reward
 
-        # Train the forward dynamics
-        self.aux_loss += self.train_forward_dynamics_network(X_c_r, X_r, rep_size, enlargement)
+        self.aux_loss = self.train_forward_dynamics_network(X_c_r, X_r, rep_size, enlargement)-lowerbound
 
         mask = tf.random_uniform(shape=tf.shape(self.aux_loss), minval=0., maxval=1., dtype=tf.float32)
         mask = tf.cast(mask < self.proportion_of_exp_used_for_predictor_update, tf.float32)
-
         #self.aux_loss = tf.reduce_sum(mask * self.aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
 
     def define_dynamics_prediction_rew(self, convfeat, rep_size, enlargement):
         #Dynamics loss with random features.
-
+        
         # Random target network.
         for ph in self.ph_ob.values():
             if len(ph.shape.as_list()) == 5:  # B,T,H,W,C
