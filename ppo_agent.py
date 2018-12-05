@@ -33,12 +33,15 @@ class InteractionState(object):
         self.env_results = [None] * self.nlump
         self.buf_vpreds_int = np.zeros((nenvs, nsteps), np.float32)
         self.buf_vpreds_ext = np.zeros((nenvs, nsteps), np.float32)
+        self.buf_vpreds_emp = np.zeros((nenvs, nsteps), np.float32)
         self.buf_nlps = np.zeros((nenvs, nsteps), np.float32)
         self.buf_advs = np.zeros((nenvs, nsteps), np.float32)
         self.buf_advs_int = np.zeros((nenvs, nsteps), np.float32)
         self.buf_advs_ext = np.zeros((nenvs, nsteps), np.float32)
+        self.buf_advs_emp = np.zeros((nenvs, nsteps), np.float32)
         self.buf_rews_int = np.zeros((nenvs, nsteps), np.float32)
         self.buf_rews_ext = np.zeros((nenvs, nsteps), np.float32)
+        self.buf_rews_emp = np.zeros((nenvs, nsteps), np.float32)
         self.buf_acs = np.zeros((nenvs, nsteps, *ac_space.shape), ac_space.dtype)
         self.buf_obs = { k: np.zeros(
                             [nenvs, nsteps] + stochpol.ph_ob[k].shape.as_list()[2:],
@@ -52,9 +55,12 @@ class InteractionState(object):
         self.seg_init_mem_state = copy(self.mem_state) # Memory state at beginning of segment of timesteps
         self.rff_int = RewardForwardFilter(gamma)
         self.rff_rms_int = RunningMeanStd(comm=comm, use_mpi=True)
+        self.rff_emp = RewardForwardFilter(gamma)
+        self.rff_rms_emp = RunningMeanStd(comm=comm, use_mpi=True)
         self.buf_new_last = self.buf_news[:, 0, ...].copy()
         self.buf_vpred_int_last = self.buf_vpreds_int[:, 0, ...].copy()
         self.buf_vpred_ext_last = self.buf_vpreds_ext[:, 0, ...].copy()
+        self.buf_vpred_emp_last = self.buf_vpreds_emp[:, 0, ...].copy()
         self.step_count = 0 # counts number of timesteps that you've interacted with this set of environments
         self.t_last_update = time.time()
         self.statlists = defaultdict(lambda : deque([], maxlen=100)) # Count other stats, e.g. optimizer outputs
@@ -112,6 +118,7 @@ class PpoAgent(object):
         self.lr = lr
         self.ext_coeff = ext_coeff
         self.int_coeff = int_coeff
+        self.emp_coeff = int_coeff
         self.use_news = use_news
         self.update_ob_stats_every_step = update_ob_stats_every_step
         self.abs_scope = (tf.get_variable_scope().name + '/' + scope).lstrip('/')
@@ -146,6 +153,7 @@ class PpoAgent(object):
             self.ph_adv = tf.placeholder(tf.float32, [None, None])
             self.ph_ret_int = tf.placeholder(tf.float32, [None, None])
             self.ph_ret_ext = tf.placeholder(tf.float32, [None, None])
+            self.ph_ret_emp = tf.placeholder(tf.float32, [None, None])
             self.ph_oldnlp = tf.placeholder(tf.float32, [None, None])
             self.ph_oldvpred = tf.placeholder(tf.float32, [None, None])
             self.ph_lr = tf.placeholder(tf.float32, [])
@@ -155,9 +163,10 @@ class PpoAgent(object):
             #Define loss.
             neglogpac = self.stochpol.pd_opt.neglogp(self.stochpol.ph_ac)
             entropy = tf.reduce_mean(self.stochpol.pd_opt.entropy())
-            vf_loss_int = (0.5 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_int_opt - self.ph_ret_int))
-            vf_loss_ext = (0.5 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_ext_opt - self.ph_ret_ext))
-            vf_loss = vf_loss_int + vf_loss_ext
+            vf_loss_int = (0.33 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_int_opt - self.ph_ret_int))
+            vf_loss_ext = (0.33 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_ext_opt - self.ph_ret_ext))
+            vf_loss_emp = (0.33 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_emp_opt - self.ph_ret_emp))
+            vf_loss = vf_loss_int + vf_loss_ext + vf_loss_emp
             ratio = tf.exp(self.ph_oldnlp - neglogpac) # p_new / p_old
             negadv = - self.ph_adv
             pg_losses1 = negadv * ratio

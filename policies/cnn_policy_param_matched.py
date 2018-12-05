@@ -432,7 +432,6 @@ class CnnPolicy(StochasticPolicy):
                 rgbr = [to2d(xr)]
                 X_r = fc(rgbr[0], 'fc1r', nh=rep_size, init_scale=np.sqrt(2))
 
-
         self.feat_var = tf.reduce_mean(tf.nn.moments(X_r, axes=[0])[1])
         self.max_feat = tf.reduce_max(tf.abs(X_r))
 
