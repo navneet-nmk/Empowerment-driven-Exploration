@@ -321,18 +321,23 @@ class PpoAgent(object):
         rets_ext = self.I.buf_advs_ext + self.I.buf_vpreds_ext
 
         #Combine the extrinsic and intrinsic and empowerment advantages.
-        self.I.buf_advs = self.int_coeff*self.I.buf_advs_int + self.ext_coeff*self.I.buf_advs_ext + self.emp_coeff*self.I.buf_advs_emp
+        self.I.buf_advs = self.int_coeff*self.I.buf_advs_int + self.ext_coeff*self.I.buf_advs_ext \
+                          + self.emp_coeff*self.I.buf_advs_emp
 
         #Collects info for reporting.
         info = dict(
             advmean = self.I.buf_advs.mean(),
-            advstd  = self.I.buf_advs.std(),
+            advstd = self.I.buf_advs.std(),
+
             retintmean = rets_int.mean(), # previously retmean
             retintstd  = rets_int.std(), # previously retstd
+
             retextmean = rets_ext.mean(), # previously not there
             retextstd  = rets_ext.std(), # previously not there
+
             retempmean = rets_emp.mean(),
             retempstd = rets_emp.std(),
+
             rewintmean_unnorm = rewmean, # previously rewmean
             rewintmax_unnorm = rewmax, # previously not there
             rewintmean_norm = self.mean_int_rew, # previously rewintmean
@@ -340,9 +345,19 @@ class PpoAgent(object):
             rewintstd_unnorm  = rewstd, # previously rewstd
             vpredintmean = self.I.buf_vpreds_int.mean(), # previously vpredmean
             vpredintstd  = self.I.buf_vpreds_int.std(), # previously vrpedstd
+
+            rewempmean_unnorm=rewempmean,  # previously rewmean
+            rewempmax_unnorm=rewempmax,  # previously not there
+            rewempmean_norm=self.mean_emp_rew,  # previously rewintmean
+            rewempmax_norm=self.max_emp_rew,  # previously rewintmax
+            rewempstd_unnorm=rewempstd,  # previously rewstd
+            vpredempmean = self.I.buf_vpreds_emp.mean(),  # previously vpredmean
+            vpredempstd = self.I.buf_vpreds_emp.std(),  # previously vrpedstd
             vpredextmean = self.I.buf_vpreds_ext.mean(), # previously not there
             vpredextstd  = self.I.buf_vpreds_ext.std(), # previously not there
+
             ev_int = np.clip(explained_variance(self.I.buf_vpreds_int.ravel(), rets_int.ravel()), -1, None),
+            ev_emp = np.clip(explained_variance(self.I.buf_vpreds_emp.ravel(), rets_emp.ravel()), -1, None),
             ev_ext = np.clip(explained_variance(self.I.buf_vpreds_ext.ravel(), rets_ext.ravel()), -1, None),
             rooms = SemicolonList(self.rooms),
             n_rooms = len(self.rooms),
@@ -356,26 +371,31 @@ class PpoAgent(object):
                      'rews_int': self.I.buf_rews_int,
                      'rews_int_norm': rews_int,
                      'rews_ext': self.I.buf_rews_ext,
+                     'rews_emp': self.I.buf_rews_emp,
+                     'rews_emp_norm': rews_emp,
                      'vpred_int': self.I.buf_vpreds_int,
                      'vpred_ext': self.I.buf_vpreds_ext,
+                     'vpred_emp': self.I.buf_vpreds_emp,
                      'adv_int': self.I.buf_advs_int,
                      'adv_ext': self.I.buf_advs_ext,
+                     'adv_emp':self.I.buf_advs_emp,
                      'ent': self.I.buf_ent,
                      'ret_int': rets_int,
                      'ret_ext': rets_ext,
+                     'ret_emp':rets_emp,
                      }
         if self.I.venvs[0].record_obs:
             to_record['obs'] = self.I.buf_obs[None]
         self.recorder.record(bufs=to_record,
                              infos=self.I.buf_epinfos)
 
-
-        #Create feeddict for optimization.
+        # Create feeddict for optimization.
         envsperbatch = self.I.nenvs // self.nminibatches
         ph_buf = [
             (self.stochpol.ph_ac, self.I.buf_acs),
             (self.ph_ret_int, rets_int),
             (self.ph_ret_ext, rets_ext),
+            (self.ph_ret_emp, rets_emp),
             (self.ph_oldnlp, self.I.buf_nlps),
             (self.ph_adv, self.I.buf_advs),
         ]
@@ -397,7 +417,7 @@ class PpoAgent(object):
 
         epoch = 0
         start = 0
-        #Optimizes on current data for several epochs.
+        # Optimizes on current data for several epochs.
         while epoch < self.nepochs:
             end = start + envsperbatch
             mbenvinds = slice(start, end, None)
@@ -414,7 +434,7 @@ class PpoAgent(object):
                 lossdict = dict(zip([n for n in self.loss_names], ret), axis=0)
             else:
                 lossdict = {}
-            #Synchronize the lossdict across mpi processes, otherwise weights may be rolled back on one process but not another.
+            # Synchronize the lossdict across mpi processes, otherwise weights may be rolled back on one process but not another.
             _maxkl = lossdict.pop('maxkl')
             lossdict = dict_gather(self.comm_train, lossdict, op='mean')
             maxmaxkl = dict_gather(self.comm_train, {"maxkl":_maxkl}, op='max')
@@ -480,7 +500,7 @@ class PpoAgent(object):
             dict_obs = self.stochpol.ensure_observation_is_dict(obs)
             with logger.ProfileKV("policy_inference"):
                 #Calls the policy and value function on current observation.
-                acs, vpreds_int, vpreds_ext, nlps, self.I.mem_state[memsli], ent = self.stochpol.call(dict_obs, news, self.I.mem_state[memsli],
+                acs, vpreds_int, vpreds_ext, vpreds_emp, nlps, self.I.mem_state[memsli], ent = self.stochpol.call(dict_obs, news, self.I.mem_state[memsli],
                                                                                                                update_obs_stats=self.update_ob_stats_every_step)
             self.env_step(l, acs)
 
@@ -490,6 +510,7 @@ class PpoAgent(object):
             self.I.buf_news[sli, t] = news
             self.I.buf_vpreds_int[sli, t] = vpreds_int
             self.I.buf_vpreds_ext[sli, t] = vpreds_ext
+            self.I.buf_vpreds_emp[sli, t] = vpreds_emp
             self.I.buf_nlps[sli, t] = nlps
             self.I.buf_acs[sli, t] = acs
             self.I.buf_ent[sli, t] = ent
@@ -509,7 +530,7 @@ class PpoAgent(object):
                     self.I.buf_ob_last[k][sli] = dict_nextobs[k]
                 self.I.buf_new_last[sli] = nextnews
                 with logger.ProfileKV("policy_inference"):
-                    _, self.I.buf_vpred_int_last[sli], self.I.buf_vpred_ext_last[sli], _, _, _ = self.stochpol.call(dict_nextobs, nextnews, self.I.mem_state[memsli], update_obs_stats=False)
+                    _, self.I.buf_vpred_int_last[sli], self.I.buf_vpred_ext_last[sli], self.I.buf_vpreds_emp_last[sli], _, _ = self.stochpol.call(dict_nextobs, nextnews, self.I.mem_state[memsli], update_obs_stats=False)
                 self.I.buf_rews_ext[sli, t] = rews
 
             #Calcuate the intrinsic rewards for the rollout.
@@ -526,7 +547,7 @@ class PpoAgent(object):
             fd.update({self.stochpol.ph_mean: self.stochpol.ob_rms.mean,
                        self.stochpol.ph_std: self.stochpol.ob_rms.var ** 0.5})
             fd[self.stochpol.ph_ac] = self.I.buf_acs
-            self.I.buf_rews_int[:] = tf.get_default_session().run(self.stochpol.int_rew, fd)
+            self.I.buf_rews_emp[:] = tf.get_default_session().run(self.stochpol.empowerment_rew, fd)
 
             if not self.update_ob_stats_every_step:
                 #Update observation normalization parameters after the rollout is completed.
