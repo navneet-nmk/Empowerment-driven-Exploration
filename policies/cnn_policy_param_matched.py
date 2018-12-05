@@ -94,9 +94,9 @@ class CnnPolicy(StochasticPolicy):
                               )
 
         if dynamics_bonus:
-            self.define_dynamics_prediction_rew(convfeat=convfeat, rep_size=rep_size, enlargement=enlargement)
+            self.define_self_prediction_rew(convfeat=convfeat, rep_size=rep_size, enlargement=enlargement)
         else:
-            self.define_empowerment_prediction_rew(convfeat=convfeat, rep_size=rep_size, enlargement=enlargement)
+            self.define_self_prediction_rew(convfeat=convfeat, rep_size=rep_size, enlargement=enlargement)
 
         pd = self.pdtype.pdfromflat(self.pdparam_rollout)
         self.a_samp = pd.sample()
@@ -108,6 +108,7 @@ class CnnPolicy(StochasticPolicy):
 
         self.ph_istate = ph_istate
 
+    # Source policy w(a|s) which is used as the exploration policy for calculating the empowerment of a state.
     def apply_source_policy(self, current_states, enlargement, pdparamsize):
 
         activ = tf.nn.relu
