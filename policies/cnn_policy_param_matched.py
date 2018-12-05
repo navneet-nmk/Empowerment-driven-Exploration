@@ -108,39 +108,23 @@ class CnnPolicy(StochasticPolicy):
 
         self.ph_istate = ph_istate
 
-    def apply_source_policy(self, ph_ob, scope, reuse, hidsize, pdparamsize):
-
-        data_format = 'NHWC'
-        ph = ph_ob
-        assert len(ph.shape.as_list()) == 5  # B,T,H,W,C
-
-        logger.info("CnnPolicy: using '%s' shape %s as image input" % (ph.name, str(ph.shape)))
-        # Normalize
-        X = tf.cast(ph, tf.float32) / 255.
-
-        X = tf.reshape(X, (-1, *ph.shape.as_list()[-3:]))
+    def apply_source_policy(self, current_states, enlargement, pdparamsize):
 
         activ = tf.nn.relu
-        yes_gpu = any(get_available_gpus())
 
-        with tf.variable_scope(scope, reuse=reuse), tf.device('/gpu:0' if yes_gpu else '/cpu:0'):
+        X = activ(fc(current_states, 'sourcec1', init_scale=np.sqrt(2), nh=128*enlargement))
+        X = activ(fc(X, 'sourcec2',  init_scale=np.sqrt(2), nh=256*enlargement))
+        X = activ(fc(X, 'sourcec3', init_scale=np.sqrt(2), nh=256*enlargement))
 
-            X = activ(conv(X, 'sourcec1', nf=32, rf=8, stride=4, init_scale=np.sqrt(2), data_format=data_format))
-            X = activ(conv(X, 'sourcec2', nf=64, rf=4, stride=2, init_scale=np.sqrt(2), data_format=data_format))
-            X = activ(conv(X, 'sourcec3', nf=64, rf=4, stride=1, init_scale=np.sqrt(2), data_format=data_format))
+        mix_other_observations = [X]
+        X = tf.concat(mix_other_observations, axis=1)
+        X = activ(fc(X, 'sourcefc1', nh=256*enlargement, init_scale=np.sqrt(2)))
 
-            X = to2d(X)
+        additional_size = 448
+        X = activ(fc(X, 'sourcefc_additional', nh=additional_size, init_scale=np.sqrt(2)))
 
-            mix_other_observations = [X]
-            X = tf.concat(mix_other_observations, axis=1)
-            X = activ(fc(X, 'sourcefc1', nh=hidsize, init_scale=np.sqrt(2)))
-
-            additional_size = 448
-            X = activ(fc(X, 'sourcefc_additional', nh=additional_size, init_scale=np.sqrt(2)))
-
-            actions = X + activ(fc(X, 'sourcefc2act', nh=additional_size, init_scale=0.1))
-            pdparam = fc(actions, 'sourcepd', nh=pdparamsize, init_scale=0.01)
-
+        actions = X + activ(fc(X, 'sourcefc2act', nh=additional_size, init_scale=0.1))
+        pdparam = fc(actions, 'sourcepd', nh=pdparamsize, init_scale=0.01)
 
         return pdparam
 
@@ -250,22 +234,20 @@ class CnnPolicy(StochasticPolicy):
         print(ac_one_hot.shape)
         return ac_one_hot
 
-    def calculate_n_step_empowerment(self, observations, next_observations, pdparamsize, scope,
-                                     reuse, enlargement, convfeat, rep_size,  k=5):
+    def calculate_n_step_empowerment(self, current_states, next_states, pdparamsize,
+                                    enlargement, rep_size,  k=5):
         # Calculate the next states for the next k actions and calculate the resulting empowerment
 
         # Follow the source policy for k steps and get the resulting state using the
         # learnt dynamics model.
 
         all_actions = []
-        final_observations = None
-
-
+        final_states = None
 
         for i in range(k):
             # Calculate the actions using the source policy
-            actions = self.apply_source_policy(ph_ob=observations, scope=scope, reuse=reuse,
-                                                pdparamsize=pdparamsize, hidsize=self.hid)
+            actions = self.apply_source_policy(current_states,
+                                                pdparamsize=pdparamsize, enlargement=enlargement)
 
             # Convert the actions to one-hot encoding
             ac_one_hot = tf.one_hot(actions, self.ac_space.n, axis=2)
@@ -275,18 +257,17 @@ class CnnPolicy(StochasticPolicy):
 
             all_actions.append(ac_one_hot)
             # Get the next states
-            next_observations = self.apply_forward_dynamics_model(observations, actions,
-                                                                  enlargement=enlargement, convfeat=convfeat,
+            next_source_states = self.apply_forward_dynamics_model(current_states, actions,
+                                                                  enlargement=enlargement,
                                                                   rep_size=rep_size)
 
-            final_observations = next_observations
-            observations = next_observations
-
-
+            final_states = next_source_states
+            current_states = next_source_states
 
         # We then get the (state, [actions], resulting state) tuples.
 
         all_actions = tf.concat(all_actions, axis=-1)
+        print(all_actions.shape)
 
         def cond(x):
             return tf.concat([x, all_actions], 1)
@@ -297,14 +278,15 @@ class CnnPolicy(StochasticPolicy):
 
         # Statistics network
 
-        # Random shuffle the next states
+        # Get the joint distribution of the current states, actions and the final states
         p_sa = tf.nn.relu(
-            fc(cond(final_observations), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+            fc(cond(final_states), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
         p_sa = tf.nn.relu(fc(p_sa, 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
         p_sa = tf.nn.relu(fc(p_sa, 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
         p_sa = fc(p_sa, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
 
-        p_s_a = tf.nn.relu(fc(cond(next_observations), 'stats_hat1_pred', nh=256 * enlargement,
+        # Get the marginal distribution of the next states given the current states and the source policy
+        p_s_a = tf.nn.relu(fc(cond(next_states), 'stats_hat1_pred', nh=256 * enlargement,
                               init_scale=np.sqrt(2)))
         p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
         p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
@@ -323,6 +305,7 @@ class CnnPolicy(StochasticPolicy):
             y = tf.log(tf.reduce_sum(tf.exp(x - x_max), axis=axis)) + x_max
             return y
 
+        # Use the Jenson shannon divergence for calculating the reward
         int_rew = positive_expectation - negative_expectation
         int_rew = tf.reshape(int_rew, (self.sy_nenvs, self.sy_nsteps - 1))
 
@@ -340,7 +323,7 @@ class CnnPolicy(StochasticPolicy):
 
         return int_rew, lower_bound
 
-    def apply_forward_dynamics_model(self, observation, ac, enlargement, convfeat, rep_size):
+    def apply_forward_dynamics_model(self, current_states, ac, enlargement, rep_size):
         # Dynamics loss with random features.
 
         # Predictor network.
@@ -354,58 +337,15 @@ class CnnPolicy(StochasticPolicy):
         def cond(x):
             return tf.concat([x, ac_one_hot], 1)
 
-        xrp = observation
-        # ph_mean, ph_std are 84x84x1, so we subtract the average of the last channel from all channels. Is this ok?
-        xrp = tf.clip_by_value((xrp - self.ph_mean) / self.ph_std, -5.0, 5.0)
-
-        xrp = tf.nn.leaky_relu(conv(xrp, 'c1rp_pred', nf=convfeat, rf=8, stride=4, init_scale=np.sqrt(2)))
-        xrp = tf.nn.leaky_relu(conv(xrp, 'c2rp_pred', nf=convfeat * 2, rf=4, stride=2, init_scale=np.sqrt(2)))
-        xrp = tf.nn.leaky_relu(conv(xrp, 'c3rp_pred', nf=convfeat * 2, rf=3, stride=1, init_scale=np.sqrt(2)))
-        rgbrp = to2d(xrp)
-
-        # X_r_hat = tf.nn.relu(fc(rgb[0], 'fc1r_hat1', nh=256 * enlargement, init_scale=np.sqrt(2)))
-        X_r_hat = tf.nn.relu(fc(cond(rgbrp), 'fc1r_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+        X_r_hat = tf.nn.relu(fc(cond(current_states), 'fc1r_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
         X_r_hat = tf.nn.relu(fc(cond(X_r_hat), 'fc1r_hat2_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
-        # X_r_hat is the next state in the representation size
+        # X_r_hat are the next states in the representation size
         X_r_hat = fc(cond(X_r_hat), 'fc1r_hat3_pred', nh=rep_size, init_scale=np.sqrt(2))
 
         return X_r_hat
 
-    def train_forward_dynamics_network(self, convfeat, rep_size, enlargement):
+    def train_forward_dynamics_network(self, current_states, next_states, rep_size, enlargement):
         #Dynamics loss with random features.
-
-        # Random target network.
-        for ph in self.ph_ob.values():
-            if len(ph.shape.as_list()) == 5:  # B,T,H,W,C
-                logger.info("CnnTarget: using '%s' shape %s as image input" % (ph.name, str(ph.shape)))
-                # Get the next states (i.e. leave out the first timestep)
-                xr = ph[:,1:]
-                xr = tf.cast(xr, tf.float32)
-                xr = tf.reshape(xr, (-1, *ph.shape.as_list()[-3:]))[:, :, :, -1:]
-                xr = tf.clip_by_value((xr - self.ph_mean) / self.ph_std, -5.0, 5.0)
-
-                xr = tf.nn.leaky_relu(conv(xr, 'c1r', nf=convfeat * 1, rf=8, stride=4, init_scale=np.sqrt(2)))
-                xr = tf.nn.leaky_relu(conv(xr, 'c2r', nf=convfeat * 2 * 1, rf=4, stride=2, init_scale=np.sqrt(2)))
-                xr = tf.nn.leaky_relu(conv(xr, 'c3r', nf=convfeat * 2 * 1, rf=3, stride=1, init_scale=np.sqrt(2)))
-                rgbr = [to2d(xr)]
-                X_r = fc(rgbr[0], 'fc1r', nh=rep_size, init_scale=np.sqrt(2))
-
-
-        # Random Source Network
-        for ph in self.ph_ob.values():
-            if len(ph.shape.as_list()) == 5:    #B,T,H,W,C
-                logger.info("CnnTarget: using '%s' shape %s as image input" % (ph.name, str(ph.shape)))
-                # Get the current states (i.e. leave out the first timestep)
-                xnr = ph[:, :-1]
-                xnr = tf.cast(xnr, tf.float32)
-                xnr = tf.reshape(xnr, (-1, *ph.shape.as_list()[-3:]))[:, :, :, -1:]
-                xnr = tf.clip_by_value((xnr - self.ph_mean) / self.ph_std, -5.0, 5.0)
-
-                xnr = tf.nn.leaky_relu(conv(xnr, 'c1r', nf=convfeat * 1, rf=8, stride=4, init_scale=np.sqrt(2)))
-                xnr = tf.nn.leaky_relu(conv(xnr, 'c2r', nf=convfeat * 2 * 1, rf=4, stride=2, init_scale=np.sqrt(2)))
-                xnr = tf.nn.leaky_relu(conv(xnr, 'c3r', nf=convfeat * 2 * 1, rf=3, stride=1, init_scale=np.sqrt(2)))
-                rgbnr = [to2d(xnr)]
-                X_nr = fc(rgbnr[0], 'fc1r', nh=rep_size, init_scale=np.sqrt(2))
 
         # Predictor network.
 
@@ -420,19 +360,19 @@ class CnnPolicy(StochasticPolicy):
         def cond(x):
             return tf.concat([x, ac_one_hot], 1)
 
-        X_r_hat = tf.nn.relu(fc(cond(X_nr), 'fc1r_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+        X_r_hat = tf.nn.relu(fc(cond(current_states), 'fc1r_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
         X_r_hat = tf.nn.relu(fc(cond(X_r_hat), 'fc1r_hat2_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
         X_r_hat = fc(cond(X_r_hat), 'fc1r_hat3_pred', nh=rep_size, init_scale=np.sqrt(2))
 
-        self.feat_var = tf.reduce_mean(tf.nn.moments(X_r, axes=[0])[1])
-        self.max_feat = tf.reduce_max(tf.abs(X_r))
+        self.feat_var = tf.reduce_mean(tf.nn.moments(next_states, axes=[0])[1])
+        self.max_feat = tf.reduce_max(tf.abs(next_states))
 
-        noisy_targets = tf.stop_gradient(X_r)
+        noisy_targets = tf.stop_gradient(next_states)
         # self.aux_loss = tf.reduce_mean(tf.square(noisy_targets-X_r_hat))
         aux_loss = tf.reduce_mean(tf.square(noisy_targets - X_r_hat), -1)
-        mask = tf.random_uniform(shape=tf.shape(aux_loss), minval=0., maxval=1., dtype=tf.float32)
-        mask = tf.cast(mask < self.proportion_of_exp_used_for_predictor_update, tf.float32)
-        aux_loss = tf.reduce_sum(mask * aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
+        #mask = tf.random_uniform(shape=tf.shape(aux_loss), minval=0., maxval=1., dtype=tf.float32)
+        #mask = tf.cast(mask < self.proportion_of_exp_used_for_predictor_update, tf.float32)
+        #aux_loss = tf.reduce_sum(mask * aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
 
         return aux_loss
 
@@ -449,29 +389,9 @@ class CnnPolicy(StochasticPolicy):
         logger.info("Using Empowerment BONUS ****************************************************")
         logger.info("Calculating 5 step empowerment *********************************************")
 
-        # Make the one hot encoding of the action to add to the state
-        ac_one_hot = tf.one_hot(self.ph_ac, self.ac_space.n, axis=2)
-        assert ac_one_hot.get_shape().ndims == 3
-        assert ac_one_hot.get_shape().as_list() == [None, None, self.ac_space.n], ac_one_hot.get_shape().as_list()
-        ac_one_hot = tf.reshape(ac_one_hot, (-1, self.ac_space.n))
-
-        def cond(x, y, shuffle=False):
-            if shuffle:
-                new_actions = tf.random_shuffle(self.ph_ac)
-                ac_one_hot_shuffled = tf.one_hot(new_actions, self.ac_space.n, axis=2)
-                assert ac_one_hot_shuffled.get_shape().ndims == 3
-                assert ac_one_hot_shuffled.get_shape().as_list() == [None, None,
-                                                            self.ac_space.n], ac_one_hot_shuffled.get_shape().as_list()
-                ac_one_hot_shuffled = tf.reshape(ac_one_hot_shuffled, (-1, self.ac_space.n))
-                return tf.concat([x, y, ac_one_hot_shuffled], 1)
-
-            else:
-                return tf.concat([x, y, ac_one_hot], 1)
-
 
         # Empowerment value with random features
 
-        # Calculate the feature embedding for the next states
         for ph in self.ph_ob.values():
             if len(ph.shape.as_list()) == 5: # B, T, H, W, C
                 logger.info("CnnTarget: using '%s' shape %s as image input" % (ph.name, str(ph.shape)))
@@ -484,9 +404,11 @@ class CnnPolicy(StochasticPolicy):
                 cr = tf.nn.leaky_relu(conv(cr, 'c2r', nf=convfeat * 2 * 1, rf=4, stride=2, init_scale=np.sqrt(2)))
                 cr = tf.nn.leaky_relu(conv(cr, 'c3r', nf=convfeat * 2 * 1, rf=3, stride=1, init_scale=np.sqrt(2)))
                 rgbcr = [to2d(cr)]
+                # Calculate the feature embedding for the current states
                 # The current states
                 X_c_r = fc(rgbcr[0], 'fc1r', nh=rep_size, init_scale=np.sqrt(2))
 
+                # Calculate the feature embedding for the next states
                 # The next states
                 xr = ph[:, 1:]
                 xr = tf.cast(xr, tf.float32)
@@ -499,65 +421,17 @@ class CnnPolicy(StochasticPolicy):
                 rgbr = [to2d(xr)]
                 X_r = fc(rgbr[0], 'fc1r', nh=rep_size, init_scale=np.sqrt(2))
 
-                # Get every fourth state
-                X_finals = X_r[::8]
-                X_finals = X_finals[1:]
-                final_s = X_r[-1]
-                final_s = tf.reshape(final_s, shape=(1, 512))
-                X_finals = tf.concat([X_finals, final_s], axis=0)
-                X_finals = tf.tile(X_finals, multiples=[1, 8])
-                X_f = tf.reshape(X_finals, shape=(-1, 512))
-
-                # Statistics network
-                next_states = tf.stop_gradient((X_r))
-                next_shuffled_states = tf.stop_gradient(tf.random_shuffle(X_r))
-
-                final_states = tf.stop_gradient(X_f)
-                current_states = tf.stop_gradient(X_c_r)
-
-                # Random shuffle the next states
-                p_sa = tf.nn.relu(fc(cond(final_states, current_states), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
-                p_sa = tf.nn.relu(fc(p_sa, 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
-                p_sa = tf.nn.relu(fc(p_sa, 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
-                p_sa = fc(p_sa, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
-
-                p_s_a = tf.nn.relu(fc(cond(next_shuffled_states, current_states), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
-                p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
-                p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
-                p_s_a = fc(p_s_a, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
 
         self.feat_var = tf.reduce_mean(tf.nn.moments(X_r, axes=[0])[1])
         self.max_feat = tf.reduce_max(tf.abs(X_r))
 
-        log_2 = math.log(2.)
-        positive_expectation = log_2 - tf.nn.softplus(-tf.stop_gradient(p_sa))
-        negative_expectation = tf.nn.softplus(-tf.stop_gradient(p_s_a))+tf.stop_gradient(p_s_a)-log_2
+        # Get the intrinsic reward and the lower bound loss
+        intrinsic_reward , lowerbound = self.calculate_n_step_empowerment()
 
-        def log_sum_exp(x, axis=None):
-            x_max = tf.maximum(x, axis)[0]
-            y = tf.log(tf.reduce_sum(tf.exp(x - x_max), axis=axis)) + x_max
-            return y
+        self.aux_loss = -lowerbound
 
-        # Donsker-Varadhan representation for the reward
-        positive_expectation = p_sa
-        negative_expectation = log_sum_exp(p_s_a, 0) - tf.log(4096.)
-
-        self.int_rew = positive_expectation - negative_expectation
-        self.int_rew = tf.reshape(self.int_rew, (self.sy_nenvs, self.sy_nsteps - 1))
-
-        # Using the JSD for the lower bound calculation (since this will not be unbounded compared to the KL divergence)
-        #self.lower_bound = tf.reduce_mean(p_sa) - tf.log(tf.reduce_mean(tf.exp(p_s_a)))
-
-        log_2 = math.log(2.)
-        positive_expectation = log_2 - tf.nn.softplus(-p_sa)
-        negative_expectation = tf.nn.softplus(-p_s_a)+p_s_a-log_2
-
-        positive_expectation = tf.reduce_mean(positive_expectation)
-        negative_expectation = tf.reduce_mean(negative_expectation)
-
-        self.lower_bound = positive_expectation - negative_expectation
-
-        self.aux_loss = -self.lower_bound
+        # Train the forward dynamics
+        self.aux_loss += self.train_forward_dynamics_network(X_c_r, X_r, rep_size, enlargement)
 
         mask = tf.random_uniform(shape=tf.shape(self.aux_loss), minval=0., maxval=1., dtype=tf.float32)
         mask = tf.cast(mask < self.proportion_of_exp_used_for_predictor_update, tf.float32)
