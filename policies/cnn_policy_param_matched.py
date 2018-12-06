@@ -371,7 +371,7 @@ class CnnPolicy(StochasticPolicy):
         assert ac_one_hot.get_shape().ndims == 3
         assert ac_one_hot.get_shape().as_list() == [None, None, self.ac_space.n], ac_one_hot.get_shape().as_list()
         ac_one_hot = tf.reshape(ac_one_hot, (-1, self.ac_space.n))
-        
+
         def cond(x):
             return tf.concat([x, ac_one_hot], 1)
 
@@ -542,4 +542,4 @@ class CnnPolicy(StochasticPolicy):
             [self.a_samp, self.vpred_int_rollout, self.vpred_ext_rollout, self.vpred_emp_rollout,
              self.nlp_samp, self.snext_rollout, self.entropy_rollout],
             feed_dict={**feed1, **feed2})
-        return a[:,0], vpred_int[:,0],vpred_ext[:,0], vpred_emp[:,0], nlp[:,0], newstate, ent[:,0]
+        return a[:,0], vpred_int[:,0], vpred_ext[:,0], vpred_emp[:,0], nlp[:,0], newstate, ent[:,0]
