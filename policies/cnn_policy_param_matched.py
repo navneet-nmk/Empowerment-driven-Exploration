@@ -231,7 +231,8 @@ class CnnPolicy(StochasticPolicy):
         loss, reward = self.define_empowerment_prediction_rew(convfeat=convfeat, rep_size=rep_size,
                                                               enlargement=enlargement)
 
-        self.aux_loss += loss
+        # Give the weightage of 0.5 to the empowerment loss to reduce it's effect on the overall loss
+        self.aux_loss += 0.5*loss
         self.empowerment_rew = reward
 
         mask = tf.random_uniform(shape=tf.shape(self.aux_loss), minval=0., maxval=1., dtype=tf.float32)
@@ -269,12 +270,13 @@ class CnnPolicy(StochasticPolicy):
             ac_one_hot = tf.reshape(ac_one_hot, (-1, self.ac_space.n))
 
             all_actions.append(ac_one_hot)
+
+            ac = tf.stop_gradient(ac_one_hot)
+
             # Get the next states
-            next_source_states = self.apply_forward_dynamics_model(current_states, actions,
+            next_source_states = self.apply_forward_dynamics_model(current_states, ac,
                                                                   enlargement=enlargement,
                                                                   rep_size=rep_size)
-
-            print(next_source_states)
 
             final_states = next_source_states
             current_states = next_source_states
@@ -379,15 +381,8 @@ class CnnPolicy(StochasticPolicy):
         X_r_hat = tf.nn.relu(fc(cond(X_r_hat), 'dynamics_fc1r_hat2_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
         X_r_hat = fc(cond(X_r_hat), 'dynamics_fc1r_hat3_pred', nh=rep_size, init_scale=np.sqrt(2))
 
-        self.feat_var = tf.reduce_mean(tf.nn.moments(next_states, axes=[0])[1])
-        self.max_feat = tf.reduce_max(tf.abs(next_states))
-
         noisy_targets = tf.stop_gradient(next_states)
-        # self.aux_loss = tf.reduce_mean(tf.square(noisy_targets-X_r_hat))
         aux_loss = tf.reduce_mean(tf.square(noisy_targets - X_r_hat), -1)
-        #mask = tf.random_uniform(shape=tf.shape(aux_loss), minval=0., maxval=1., dtype=tf.float32)
-        #mask = tf.cast(mask < self.proportion_of_exp_used_for_predictor_update, tf.float32)
-        #aux_loss = tf.reduce_sum(mask * aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
 
         return aux_loss
 
@@ -428,15 +423,11 @@ class CnnPolicy(StochasticPolicy):
                 xr = tf.cast(xr, tf.float32)
                 xr = tf.reshape(xr, (-1, *ph.shape.as_list()[-3:]))[:, :, :, -1:]
                 xr = tf.clip_by_value((xr - self.ph_mean) / self.ph_std, -5.0, 5.0)
-
                 xr = tf.nn.leaky_relu(conv(xr, 'c1r', nf=convfeat * 1, rf=8, stride=4, init_scale=np.sqrt(2)))
                 xr = tf.nn.leaky_relu(conv(xr, 'c2r', nf=convfeat * 2 * 1, rf=4, stride=2, init_scale=np.sqrt(2)))
                 xr = tf.nn.leaky_relu(conv(xr, 'c3r', nf=convfeat * 2 * 1, rf=3, stride=1, init_scale=np.sqrt(2)))
                 rgbr = [to2d(xr)]
                 X_r = fc(rgbr[0], 'fc1r', nh=rep_size, init_scale=np.sqrt(2))
-
-        self.feat_var = tf.reduce_mean(tf.nn.moments(X_r, axes=[0])[1])
-        self.max_feat = tf.reduce_max(tf.abs(X_r))
 
         current_states = tf.stop_gradient(X_c_r)
         next_states = tf.stop_gradient(X_r)
@@ -450,10 +441,6 @@ class CnnPolicy(StochasticPolicy):
         self.empowerment_reward = intrinsic_reward
 
         aux_loss = self.train_forward_dynamics_network(X_c_r, X_r, rep_size, enlargement) - lowerbound
-
-        mask = tf.random_uniform(shape=tf.shape(self.aux_loss), minval=0., maxval=1., dtype=tf.float32)
-        mask = tf.cast(mask < self.proportion_of_exp_used_for_predictor_update, tf.float32)
-        #self.aux_loss = tf.reduce_sum(mask * self.aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
 
         return aux_loss, intrinsic_reward
 
