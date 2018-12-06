@@ -440,7 +440,7 @@ class CnnPolicy(StochasticPolicy):
                                                                           rep_size=rep_size)
         self.empowerment_reward = intrinsic_reward
 
-        aux_loss = self.train_forward_dynamics_network(X_c_r, X_r, rep_size, enlargement) - lowerbound
+        aux_loss = self.train_forward_dynamics_network(X_c_r, X_r, rep_size, enlargement) - 0.5 * lowerbound
 
         return aux_loss, intrinsic_reward
 
