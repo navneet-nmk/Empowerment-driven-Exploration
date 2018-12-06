@@ -317,16 +317,15 @@ class CnnPolicy(StochasticPolicy):
         # estimation. (Ideally, we should use Jensen-Shannon divergence to avoid the unbounded nature of
         # Mutual Information). This mutual information is then used as the intrinsic reward for the agent.
 
-        log_2 = math.log(2.)
-        positive_expectation = log_2 - tf.nn.softplus(-tf.stop_gradient(p_sa))
-        negative_expectation = tf.nn.softplus(-tf.stop_gradient(p_s_a)) + tf.stop_gradient(p_s_a) - log_2
-
         def log_sum_exp(x, axis=None):
             x_max = tf.maximum(x, axis)[0]
             y = tf.log(tf.reduce_sum(tf.exp(x - x_max), axis=axis)) + x_max
             return y
+        positive_expectation = tf.stop_gradient(p_sa)
+        negative_expectation = log_sum_exp(tf.stop_gradient(p_s_a), 0) - tf.log(4096)
 
-        # Use the Jenson shannon divergence for calculating the reward
+        # Use the Jenson shannon divergence for calculating the lower bound
+        # and the KL divergence for calulating the reward
         int_rew = positive_expectation - negative_expectation
         int_rew = tf.reshape(int_rew, (self.sy_nenvs, self.sy_nsteps - 1))
 
