@@ -232,7 +232,7 @@ class CnnPolicy(StochasticPolicy):
                                                               enlargement=enlargement)
 
         self.aux_loss += loss
-        self.empowerment_reward = reward
+        self.empowerment_rew = reward
 
         mask = tf.random_uniform(shape=tf.shape(self.aux_loss), minval=0., maxval=1., dtype=tf.float32)
         mask = tf.cast(mask < self.proportion_of_exp_used_for_predictor_update, tf.float32)
