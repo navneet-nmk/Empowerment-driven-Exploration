@@ -118,7 +118,7 @@ class PpoAgent(object):
         self.lr = lr
         self.ext_coeff = ext_coeff
         self.int_coeff = int_coeff
-        self.emp_coeff = int_coeff/2
+        self.emp_coeff = 0
         self.use_news = use_news
         self.update_ob_stats_every_step = update_ob_stats_every_step
         self.abs_scope = (tf.get_variable_scope().name + '/' + scope).lstrip('/')
@@ -163,9 +163,9 @@ class PpoAgent(object):
             #Define loss.
             neglogpac = self.stochpol.pd_opt.neglogp(self.stochpol.ph_ac)
             entropy = tf.reduce_mean(self.stochpol.pd_opt.entropy())
-            vf_loss_int = (0.35 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_int_opt - self.ph_ret_int))
+            vf_loss_int = (0.5 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_int_opt - self.ph_ret_int))
             vf_loss_ext = (0.5 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_ext_opt - self.ph_ret_ext))
-            vf_loss_emp = (0.15 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_emp_opt - self.ph_ret_emp))
+            vf_loss_emp = (0 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_emp_opt - self.ph_ret_emp))
             vf_loss = vf_loss_int + vf_loss_ext + vf_loss_emp
             ratio = tf.exp(self.ph_oldnlp - neglogpac) # p_new / p_old
             negadv = - self.ph_adv
@@ -192,8 +192,11 @@ class PpoAgent(object):
 
         #Quantities for reporting.
         self._losses = [loss, pg_loss, vf_loss, entropy, clipfrac, approxkl, maxkl, self.stochpol.aux_loss,
+                        self.stochpol.self_pred_loss, self.stochpol.lower_bound, self.stochpol.dynamics_loss,
                         self.stochpol.feat_var, self.stochpol.max_feat, global_grad_norm]
-        self.loss_names = ['tot', 'pg', 'vf', 'ent', 'clipfrac', 'approxkl', 'maxkl', "auxloss", "featvar",
+        self.loss_names = ['tot', 'pg', 'vf', 'ent', 'clipfrac', 'approxkl', 'maxkl', "auxloss",
+                           "RND_loss","lower_bound","dynamics_loss",
+                           "featvar",
                            "maxfeat", "gradnorm"]
         self.I = None
         self.disable_policy_update = None

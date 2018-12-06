@@ -179,7 +179,7 @@ class CnnPolicy(StochasticPolicy):
 
         return pdparam, vpred_int, vpred_ext, snext, vpred_empowerment
 
-    def define_self_prediction_rew(self, convfeat, rep_size, enlargement):
+    def define_self_prediction_rew(self, convfeat, rep_size, enlargement, emp_loss_coeff=0.5):
         logger.info("Using RND BONUS ****************************************************")
 
         #RND bonus.
@@ -226,13 +226,14 @@ class CnnPolicy(StochasticPolicy):
         targets = tf.stop_gradient(X_r)
         # self.aux_loss = tf.reduce_mean(tf.square(noisy_targets-X_r_hat))
         self.aux_loss = tf.reduce_mean(tf.square(targets - X_r_hat), -1)
+        self.self_pred_loss = self.aux_loss
 
         # Get the empowerment reward and the empowerment loss
         loss, reward = self.define_empowerment_prediction_rew(convfeat=convfeat, rep_size=rep_size,
                                                               enlargement=enlargement)
 
         # Give the weightage of 0.5 to the empowerment loss to reduce it's effect on the overall loss
-        self.aux_loss += 0.5*loss
+        self.aux_loss += emp_loss_coeff*loss
         self.empowerment_rew = reward
 
         mask = tf.random_uniform(shape=tf.shape(self.aux_loss), minval=0., maxval=1., dtype=tf.float32)
@@ -321,6 +322,7 @@ class CnnPolicy(StochasticPolicy):
             x_max = tf.maximum(x, axis)[0]
             y = tf.log(tf.reduce_sum(tf.exp(x - x_max), axis=axis)) + x_max
             return y
+
         positive_expectation = tf.stop_gradient(p_sa)
         negative_expectation = log_sum_exp(tf.stop_gradient(p_s_a), 0) - tf.log(4096.)
 
@@ -345,6 +347,8 @@ class CnnPolicy(StochasticPolicy):
 
     # Apply the forward dynamics model to get the next state representation, given the current state and actions
     def apply_forward_dynamics_model(self, current_states, ac, enlargement, rep_size):
+        current_states = tf.stop_gradient(current_states)
+        ac = tf.stop_gradient(ac)
         # Dynamics loss with random features.
 
         # Predictor network.
@@ -385,7 +389,7 @@ class CnnPolicy(StochasticPolicy):
 
         return aux_loss
 
-    def define_empowerment_prediction_rew(self, convfeat, rep_size, enlargement, k=5):
+    def define_empowerment_prediction_rew(self, convfeat, rep_size, enlargement):
         '''
 
         :param convfeat: Convolution feature size
@@ -426,6 +430,7 @@ class CnnPolicy(StochasticPolicy):
                 xr = tf.nn.leaky_relu(conv(xr, 'c2r', nf=convfeat * 2 * 1, rf=4, stride=2, init_scale=np.sqrt(2)))
                 xr = tf.nn.leaky_relu(conv(xr, 'c3r', nf=convfeat * 2 * 1, rf=3, stride=1, init_scale=np.sqrt(2)))
                 rgbr = [to2d(xr)]
+                # The next states
                 X_r = fc(rgbr[0], 'fc1r', nh=rep_size, init_scale=np.sqrt(2))
 
         current_states = tf.stop_gradient(X_c_r)
@@ -438,8 +443,9 @@ class CnnPolicy(StochasticPolicy):
                                                                           pdparamsize=self.ac_size,
                                                                           rep_size=rep_size)
         self.empowerment_reward = intrinsic_reward
-
-        aux_loss = self.train_forward_dynamics_network(X_c_r, X_r, rep_size, enlargement) - 0.5 * lowerbound
+        self.dynamics_loss = self.train_forward_dynamics_network(X_c_r, X_r, rep_size, enlargement)
+        self.lower_bound = lowerbound
+        aux_loss = self.dynamics_loss - 0.5 * self.lower_bound
 
         return aux_loss, intrinsic_reward
 
