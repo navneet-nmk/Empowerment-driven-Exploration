@@ -118,7 +118,7 @@ class PpoAgent(object):
         self.lr = lr
         self.ext_coeff = ext_coeff
         self.int_coeff = int_coeff
-        self.emp_coeff = 0
+        self.emp_coeff = int_coeff/2
         self.use_news = use_news
         self.update_ob_stats_every_step = update_ob_stats_every_step
         self.abs_scope = (tf.get_variable_scope().name + '/' + scope).lstrip('/')
@@ -163,9 +163,9 @@ class PpoAgent(object):
             #Define loss.
             neglogpac = self.stochpol.pd_opt.neglogp(self.stochpol.ph_ac)
             entropy = tf.reduce_mean(self.stochpol.pd_opt.entropy())
-            vf_loss_int = (0.5 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_int_opt - self.ph_ret_int))
+            vf_loss_int = (0.3 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_int_opt - self.ph_ret_int))
             vf_loss_ext = (0.5 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_ext_opt - self.ph_ret_ext))
-            vf_loss_emp = (0 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_emp_opt - self.ph_ret_emp))
+            vf_loss_emp = (0.2 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_emp_opt - self.ph_ret_emp))
             vf_loss = vf_loss_int + vf_loss_ext + vf_loss_emp
             ratio = tf.exp(self.ph_oldnlp - neglogpac) # p_new / p_old
             negadv = - self.ph_adv
@@ -283,8 +283,8 @@ class PpoAgent(object):
         rews_ext = self.I.buf_rews_ext
 
         rewmean, rewstd, rewmax = self.I.buf_rews_int.mean(), self.I.buf_rews_int.std(), np.max(self.I.buf_rews_int)
-        rewempmean, rewempstd, rewempmax = self.I.buf_rews_emp.mean(), \
-                                           self.I.buf_rews_emp.std(), np.max(self.I.buf_rews_emp)
+        rewempmean, rewempstd, rewempmax, rewempmin = self.I.buf_rews_emp.mean(), \
+                                           self.I.buf_rews_emp.std(), np.max(self.I.buf_rews_emp), np.min(self.I.buf_rews_emp)
 
         # Calculate intrinsic returns and advantages.
         lastgaelam = 0
@@ -331,6 +331,9 @@ class PpoAgent(object):
         info = dict(
             advmean = self.I.buf_advs.mean(),
             advstd = self.I.buf_advs.std(),
+            advintmean = self.I.buf_advs_int.mean(),
+            advempmean = self.I.buf_advs_emp.mean(),
+            advextmean = self.I.buf_advs_ext.mean(),
 
             retintmean = rets_int.mean(), # previously retmean
             retintstd  = rets_int.std(), # previously retstd
@@ -351,6 +354,7 @@ class PpoAgent(object):
 
             rewempmean_unnorm=rewempmean,  # previously rewmean
             rewempmax_unnorm=rewempmax,  # previously not there
+            rewempmin_unnorm = rewempmin,
             rewempmean_norm=self.mean_emp_rew,  # previously rewintmean
             rewempmax_norm=self.max_emp_rew,  # previously rewintmax
             rewempstd_unnorm=rewempstd,  # previously rewstd

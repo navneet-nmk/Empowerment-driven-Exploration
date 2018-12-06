@@ -226,19 +226,21 @@ class CnnPolicy(StochasticPolicy):
         targets = tf.stop_gradient(X_r)
         # self.aux_loss = tf.reduce_mean(tf.square(noisy_targets-X_r_hat))
         self.aux_loss = tf.reduce_mean(tf.square(targets - X_r_hat), -1)
-        self.self_pred_loss = self.aux_loss
+        self.self_pred_loss = tf.reduce_mean(self.aux_loss, -1)
 
         # Get the empowerment reward and the empowerment loss
         loss, reward = self.define_empowerment_prediction_rew(convfeat=convfeat, rep_size=rep_size,
                                                               enlargement=enlargement)
 
-        # Give the weightage of 0.5 to the empowerment loss to reduce it's effect on the overall loss
+        # Give the weightage of emp_loss_coeff to the empowerment loss to weigh it's effect on the overall aux loss
         self.aux_loss += emp_loss_coeff*loss
         self.empowerment_rew = reward
+
 
         mask = tf.random_uniform(shape=tf.shape(self.aux_loss), minval=0., maxval=1., dtype=tf.float32)
         mask = tf.cast(mask < self.proportion_of_exp_used_for_predictor_update, tf.float32)
         self.aux_loss = tf.reduce_sum(mask * self.aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
+
 
     def all_actions(self):
         all_acs = [i for i in range(self.ac_space.n)]
@@ -443,9 +445,12 @@ class CnnPolicy(StochasticPolicy):
                                                                           pdparamsize=self.ac_size,
                                                                           rep_size=rep_size)
         self.empowerment_reward = intrinsic_reward
-        self.dynamics_loss = self.train_forward_dynamics_network(X_c_r, X_r, rep_size, enlargement)
-        self.lower_bound = lowerbound
-        aux_loss = self.dynamics_loss - 0.5 * self.lower_bound
+        dynamics_loss = self.train_forward_dynamics_network(X_c_r, X_r, rep_size, enlargement)
+        lower_bound = lowerbound
+        aux_loss = dynamics_loss - 0.5 * lower_bound
+
+        self.dynamics_loss = tf.reduce_mean(dynamics_loss, -1)
+        self.lower_bound = lower_bound
 
         return aux_loss, intrinsic_reward
 
