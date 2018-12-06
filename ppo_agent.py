@@ -118,7 +118,7 @@ class PpoAgent(object):
         self.lr = lr
         self.ext_coeff = ext_coeff
         self.int_coeff = int_coeff
-        self.emp_coeff = int_coeff
+        self.emp_coeff = int_coeff/2
         self.use_news = use_news
         self.update_ob_stats_every_step = update_ob_stats_every_step
         self.abs_scope = (tf.get_variable_scope().name + '/' + scope).lstrip('/')
