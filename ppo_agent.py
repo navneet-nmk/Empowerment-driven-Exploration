@@ -118,7 +118,7 @@ class PpoAgent(object):
         self.lr = lr
         self.ext_coeff = ext_coeff
         self.int_coeff = int_coeff
-        self.emp_coeff = int_coeff/2
+        self.emp_coeff = int_coeff/4
         self.use_news = use_news
         self.update_ob_stats_every_step = update_ob_stats_every_step
         self.abs_scope = (tf.get_variable_scope().name + '/' + scope).lstrip('/')
@@ -163,9 +163,9 @@ class PpoAgent(object):
             #Define loss.
             neglogpac = self.stochpol.pd_opt.neglogp(self.stochpol.ph_ac)
             entropy = tf.reduce_mean(self.stochpol.pd_opt.entropy())
-            vf_loss_int = (0.3 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_int_opt - self.ph_ret_int))
+            vf_loss_int = (0.35 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_int_opt - self.ph_ret_int))
             vf_loss_ext = (0.5 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_ext_opt - self.ph_ret_ext))
-            vf_loss_emp = (0.2 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_emp_opt - self.ph_ret_emp))
+            vf_loss_emp = (0.15 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_emp_opt - self.ph_ret_emp))
             vf_loss = vf_loss_int + vf_loss_ext + vf_loss_emp
             ratio = tf.exp(self.ph_oldnlp - neglogpac) # p_new / p_old
             negadv = - self.ph_adv
@@ -305,7 +305,7 @@ class PpoAgent(object):
             if self.use_news:
                 nextnew = self.I.buf_news[:, t + 1] if t + 1 < self.nsteps else self.I.buf_new_last
             else:
-                nextnew = 0.0 #No dones for empowerment reward.
+                nextnew = 0.0 # No dones for empowerment reward.
             nextvals = self.I.buf_vpreds_emp[:, t + 1] if t + 1 < self.nsteps else self.I.buf_vpred_emp_last
             nextnotnew = 1 - nextnew
             delta = rews_emp[:, t] + self.gamma * nextvals * nextnotnew - self.I.buf_vpreds_emp[:, t]
