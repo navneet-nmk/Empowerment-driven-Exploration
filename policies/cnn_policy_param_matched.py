@@ -134,7 +134,7 @@ class CnnPolicy(StochasticPolicy):
     def apply_policy(ph_ob, reuse, scope, hidsize, memsize, extrahid, sy_nenvs, sy_nsteps, pdparamsize):
 
         ph = ph_ob
-        assert len(ph.shape.as_list()) == 2  # B, R
+        assert len(ph.shape.as_list()) == 5  # B, T, H, W, C
 
         logger.info("CnnPolicy: using '%s' shape %s as image input" % (ph.name, str(ph.shape)))
         # Normalize
@@ -168,14 +168,15 @@ class CnnPolicy(StochasticPolicy):
                 Xtout = X + activ(fc(Xtout, 'fc2val', nh=additional_size, init_scale=0.1))
                 X = X + activ(fc(X, 'fc2act', nh=additional_size, init_scale=0.1))
             pdparam = fc(X, 'pd', nh=pdparamsize, init_scale=0.01)
-            vpred_int   = fc(Xtout, 'vf_int', nh=1, init_scale=0.01)
+            vpred_int = fc(Xtout, 'vf_int', nh=1, init_scale=0.01)
             vpred_empowerment = fc(Xtout, 'vf_empowerment', nh=1, init_scale=0.01)
-            vpred_ext   = fc(Xtout, 'vf_ext', nh=1, init_scale=0.01)
+            vpred_ext = fc(Xtout, 'vf_ext', nh=1, init_scale=0.01)
 
             pdparam = tf.reshape(pdparam, (sy_nenvs, sy_nsteps, pdparamsize))
             vpred_int = tf.reshape(vpred_int, (sy_nenvs, sy_nsteps))
             vpred_ext = tf.reshape(vpred_ext, (sy_nenvs, sy_nsteps))
             vpred_empowerment = tf.reshape(vpred_empowerment, (sy_nenvs, sy_nsteps))
+
         return pdparam, vpred_int, vpred_ext, snext, vpred_empowerment
 
     def define_self_prediction_rew(self, convfeat, rep_size, enlargement):
@@ -259,9 +260,12 @@ class CnnPolicy(StochasticPolicy):
                                                 pdparamsize=pdparamsize, enlargement=enlargement)
 
             # Convert the actions to one-hot encoding
-            ac_one_hot = tf.one_hot(actions, self.ac_space.n, axis=2)
-            assert ac_one_hot.get_shape().ndims == 3
-            assert ac_one_hot.get_shape().as_list() == [None, None, self.ac_space.n], ac_one_hot.get_shape().as_list()
+
+            pd = self.pdtype.pdfromflat(actions)
+            actions_samples = pd.sample()
+            ac_one_hot = tf.one_hot(actions_samples, self.ac_space.n, axis=-1)
+            assert ac_one_hot.get_shape().ndims == 2
+            assert ac_one_hot.get_shape().as_list() == [None, self.ac_space.n], ac_one_hot.get_shape().as_list()
             ac_one_hot = tf.reshape(ac_one_hot, (-1, self.ac_space.n))
 
             all_actions.append(ac_one_hot)
@@ -269,6 +273,8 @@ class CnnPolicy(StochasticPolicy):
             next_source_states = self.apply_forward_dynamics_model(current_states, actions,
                                                                   enlargement=enlargement,
                                                                   rep_size=rep_size)
+
+            print(next_source_states)
 
             final_states = next_source_states
             current_states = next_source_states
@@ -336,24 +342,19 @@ class CnnPolicy(StochasticPolicy):
 
         return int_rew, lower_bound
 
+    # Apply the forward dynamics model to get the next state representation, given the current state and actions
     def apply_forward_dynamics_model(self, current_states, ac, enlargement, rep_size):
         # Dynamics loss with random features.
 
         # Predictor network.
 
-        # Make the one hot encoding of the action to add to the state
-        ac_one_hot = tf.one_hot(ac, self.ac_space.n, axis=2)
-        assert ac_one_hot.get_shape().ndims == 3
-        assert ac_one_hot.get_shape().as_list() == [None, None, self.ac_space.n], ac_one_hot.get_shape().as_list()
-        ac_one_hot = tf.reshape(ac_one_hot, (-1, self.ac_space.n))
-
         def cond(x):
-            return tf.concat([x, ac_one_hot], 1)
+            return tf.concat([x, ac], 1)
 
-        X_r_hat = tf.nn.relu(fc(cond(current_states), 'fc1r_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
-        X_r_hat = tf.nn.relu(fc(cond(X_r_hat), 'fc1r_hat2_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+        X_r_hat = tf.nn.relu(fc(cond(current_states), 'dynamics_fc1r_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+        X_r_hat = tf.nn.relu(fc(cond(X_r_hat), 'dynamics_fc1r_hat2_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
         # X_r_hat are the next states in the representation size
-        X_r_hat = fc(cond(X_r_hat), 'fc1r_hat3_pred', nh=rep_size, init_scale=np.sqrt(2))
+        X_r_hat = fc(cond(X_r_hat), 'dynamics_fc1r_hat3_pred', nh=rep_size, init_scale=np.sqrt(2))
 
         return X_r_hat
 
@@ -370,12 +371,13 @@ class CnnPolicy(StochasticPolicy):
         assert ac_one_hot.get_shape().ndims == 3
         assert ac_one_hot.get_shape().as_list() == [None, None, self.ac_space.n], ac_one_hot.get_shape().as_list()
         ac_one_hot = tf.reshape(ac_one_hot, (-1, self.ac_space.n))
+        
         def cond(x):
             return tf.concat([x, ac_one_hot], 1)
 
-        X_r_hat = tf.nn.relu(fc(cond(current_states), 'fc1r_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
-        X_r_hat = tf.nn.relu(fc(cond(X_r_hat), 'fc1r_hat2_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
-        X_r_hat = fc(cond(X_r_hat), 'fc1r_hat3_pred', nh=rep_size, init_scale=np.sqrt(2))
+        X_r_hat = tf.nn.relu(fc(cond(current_states), 'dynamics_fc1r_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+        X_r_hat = tf.nn.relu(fc(cond(X_r_hat), 'dynamics_fc1r_hat2_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
+        X_r_hat = fc(cond(X_r_hat), 'dynamics_fc1r_hat3_pred', nh=rep_size, init_scale=np.sqrt(2))
 
         self.feat_var = tf.reduce_mean(tf.nn.moments(next_states, axes=[0])[1])
         self.max_feat = tf.reduce_max(tf.abs(next_states))
