@@ -322,7 +322,7 @@ class CnnPolicy(StochasticPolicy):
             y = tf.log(tf.reduce_sum(tf.exp(x - x_max), axis=axis)) + x_max
             return y
         positive_expectation = tf.stop_gradient(p_sa)
-        negative_expectation = log_sum_exp(tf.stop_gradient(p_s_a), 0) - tf.log(4096)
+        negative_expectation = log_sum_exp(tf.stop_gradient(p_s_a), 0) - tf.log(4096.)
 
         # Use the Jenson shannon divergence for calculating the lower bound
         # and the KL divergence for calulating the reward
