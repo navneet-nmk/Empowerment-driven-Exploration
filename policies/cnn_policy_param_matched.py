@@ -330,6 +330,13 @@ class CnnPolicy(StochasticPolicy):
 
         # Use the Jenson shannon divergence for calculating the lower bound
         # and the KL divergence for calulating the reward
+
+        log_2 = math.log(2.)
+        p = tf.stop_gradient(p_sa)
+        q = tf.stop_gradient(p_s_a)
+        positive_expectation = log_2 - tf.nn.softplus(-p)
+        negative_expectation = tf.nn.softplus(-q) + q - log_2
+
         int_rew = positive_expectation - negative_expectation
         int_rew = tf.reshape(int_rew, (self.sy_nenvs, self.sy_nsteps - 1))
 
