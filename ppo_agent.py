@@ -333,7 +333,7 @@ class PpoAgent(object):
         # Get the normalized returns
 
         ret_int_normalized = (rets_int - self.ret_int_rms.mean)/tf.sqrt(self.ret_int_rms.var)
-        ret_ext_normalized = (rets_ext - self.ret_ext_rms.mean) / tf.sqrt(self.ret_ext_rms.var)
+        ret_ext_normalized = rets_ext
         ret_emp_normalized = (rets_emp - self.ret_emp_rms.mean) / tf.sqrt(self.ret_emp_rms.var)
 
         # Get the normalzied advantages
