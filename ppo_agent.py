@@ -166,9 +166,9 @@ class PpoAgent(object):
             #Define loss.
             neglogpac = self.stochpol.pd_opt.neglogp(self.stochpol.ph_ac)
             entropy = tf.reduce_mean(self.stochpol.pd_opt.entropy())
-            vf_loss_int = (0.4 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_int_opt - self.ph_ret_int))
+            vf_loss_int = (0.35 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_int_opt - self.ph_ret_int))
             vf_loss_ext = (0.5 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_ext_opt - self.ph_ret_ext))
-            vf_loss_emp = (0.1 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_emp_opt - self.ph_ret_emp))
+            vf_loss_emp = (0.15 * vf_coef) * tf.reduce_mean(tf.square(self.stochpol.vpred_emp_opt - self.ph_ret_emp))
             vf_loss = vf_loss_int + vf_loss_ext + vf_loss_emp
             ratio = tf.exp(self.ph_oldnlp - neglogpac) # p_new / p_old
             negadv = - self.ph_adv
@@ -332,9 +332,9 @@ class PpoAgent(object):
 
         # Get the normalized returns
 
-        ret_int_normalized = (rets_int - self.ret_int_rms.mean)/tf.sqrt(self.ret_int_rms.var)
+        ret_int_normalized = (rets_int - self.ret_int_rms.mean)/np.sqrt(self.ret_int_rms.var)
         ret_ext_normalized = rets_ext
-        ret_emp_normalized = (rets_emp - self.ret_emp_rms.mean) / tf.sqrt(self.ret_emp_rms.var)
+        ret_emp_normalized = (rets_emp - self.ret_emp_rms.mean) / np.sqrt(self.ret_emp_rms.var)
 
         # Get the normalzied advantages
         self.I.buf_advs_int = ret_int_normalized-self.I.buf_vpreds_int
