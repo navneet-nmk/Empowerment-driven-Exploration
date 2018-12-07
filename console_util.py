@@ -12,6 +12,7 @@ def fmt_row(width, row, header=False):
     if header: out = out + "\n" + "-"*len(out)
     return out
 
+
 def fmt_item(x, l):
     if isinstance(x, np.ndarray):
         assert x.ndim==0

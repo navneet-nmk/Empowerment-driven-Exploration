@@ -188,7 +188,6 @@ class RunningMeanStd(object):
             comm = MPI.COMM_WORLD
         self.comm = comm
 
-
     def update(self, x):
         if self.use_mpi:
             batch_mean, batch_std, batch_count = mpi_moments(x, axis=0, comm=self.comm)
