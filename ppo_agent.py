@@ -118,7 +118,7 @@ class PpoAgent(object):
         self.lr = lr
         self.ext_coeff = ext_coeff
         self.int_coeff = int_coeff
-        self.emp_coeff = int_coeff/16
+        self.emp_coeff = int_coeff/4
         self.use_news = use_news
         self.update_ob_stats_every_step = update_ob_stats_every_step
         self.abs_scope = (tf.get_variable_scope().name + '/' + scope).lstrip('/')
@@ -159,6 +159,9 @@ class PpoAgent(object):
             self.ph_lr = tf.placeholder(tf.float32, [])
             self.ph_lr_pred = tf.placeholder(tf.float32, [])
             self.ph_cliprange = tf.placeholder(tf.float32, [])
+            self.ret_int_rms = RunningMeanStd()
+            self.ret_emp_rms = RunningMeanStd()
+            self.ret_ext_rms = RunningMeanStd()
 
             #Define loss.
             neglogpac = self.stochpol.pd_opt.neglogp(self.stochpol.ph_ac)
@@ -172,7 +175,7 @@ class PpoAgent(object):
             pg_losses1 = negadv * ratio
             pg_losses2 = negadv * tf.clip_by_value(ratio, 1.0 - self.ph_cliprange, 1.0 + self.ph_cliprange)
             pg_loss = tf.reduce_mean(tf.maximum(pg_losses1, pg_losses2))
-            ent_loss =  (- ent_coef) * entropy
+            ent_loss = (- ent_coef) * entropy
             approxkl = .5 * tf.reduce_mean(tf.square(neglogpac - self.ph_oldnlp))
             maxkl    = .5 * tf.reduce_max(tf.square(neglogpac - self.ph_oldnlp))
             clipfrac = tf.reduce_mean(tf.to_float(tf.greater(tf.abs(ratio - 1.0), self.ph_cliprange)))
@@ -302,14 +305,11 @@ class PpoAgent(object):
         # Calculate empowerment returns and advantages
         lastgaelam = 0
         for t in range(self.nsteps-1, -1, -1): # nsteps-2 ... 0
-            if self.use_news:
-                nextnew = self.I.buf_news[:, t + 1] if t + 1 < self.nsteps else self.I.buf_new_last
-            else:
-                nextnew = 0.0 #No dones for empowerment reward.
+            nextnew = self.I.buf_news[:, t + 1] if t + 1 < self.nsteps else self.I.buf_new_last
             nextvals = self.I.buf_vpreds_emp[:, t + 1] if t + 1 < self.nsteps else self.I.buf_vpred_emp_last
             nextnotnew = 1 - nextnew
-            delta = rews_emp[:, t] + self.gamma_ext * nextvals * nextnotnew - self.I.buf_vpreds_emp[:, t]
-            self.I.buf_advs_emp[:, t] = lastgaelam = delta + self.gamma_ext * self.lam * nextnotnew * lastgaelam
+            delta = rews_emp[:, t] + self.gamma * nextvals * nextnotnew - self.I.buf_vpreds_emp[:, t]
+            self.I.buf_advs_emp[:, t] = lastgaelam = delta + self.gamma * self.lam * nextnotnew * lastgaelam
         rets_emp = self.I.buf_advs_emp + self.I.buf_vpreds_emp
 
         # Calculate extrinsic returns and advantages.
@@ -323,7 +323,25 @@ class PpoAgent(object):
             self.I.buf_advs_ext[:, t] = lastgaelam = delta + self.gamma_ext * self.lam * nextnotnew * lastgaelam
         rets_ext = self.I.buf_advs_ext + self.I.buf_vpreds_ext
 
-        #Combine the extrinsic and intrinsic and empowerment advantages.
+        # Use Popart normalization to normalize the returns and the advantages.
+
+        # Update the running mean stats for the different returns
+        self.ret_int_rms.update(rets_int)
+        self.ret_ext_rms.update(rets_ext)
+        self.ret_emp_rms.update(rets_emp)
+
+        # Get the normalized returns
+
+        ret_int_normalized = (rets_int - self.ret_int_rms.mean)/tf.sqrt(self.ret_int_rms.var)
+        ret_ext_normalized = (rets_ext - self.ret_ext_rms.mean) / tf.sqrt(self.ret_ext_rms.var)
+        ret_emp_normalized = (rets_emp - self.ret_emp_rms.mean) / tf.sqrt(self.ret_emp_rms.var)
+
+        # Get the normalzied advantages
+        self.I.buf_advs_int = ret_int_normalized-self.I.buf_vpreds_int
+        self.I.buf_advs_ext = ret_ext_normalized-self.I.buf_vpreds_ext
+        self.I.buf_advs_emp = ret_emp_normalized-self.I.buf_vpreds_emp
+
+        # Combine the extrinsic and intrinsic and empowerment advantages.
         self.I.buf_advs = self.int_coeff*self.I.buf_advs_int + self.ext_coeff*self.I.buf_advs_ext \
                           + self.emp_coeff*self.I.buf_advs_emp
 
@@ -400,9 +418,9 @@ class PpoAgent(object):
         envsperbatch = self.I.nenvs // self.nminibatches
         ph_buf = [
             (self.stochpol.ph_ac, self.I.buf_acs),
-            (self.ph_ret_int, rets_int),
-            (self.ph_ret_ext, rets_ext),
-            (self.ph_ret_emp, rets_emp),
+            (self.ph_ret_int, ret_int_normalized),
+            (self.ph_ret_ext, ret_ext_normalized),
+            (self.ph_ret_emp, ret_emp_normalized),
             (self.ph_oldnlp, self.I.buf_nlps),
             (self.ph_adv, self.I.buf_advs),
         ]
