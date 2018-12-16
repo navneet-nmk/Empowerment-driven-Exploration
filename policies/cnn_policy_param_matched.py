@@ -307,15 +307,15 @@ class CnnPolicy(StochasticPolicy):
 
         p_sa = tf.nn.relu(
             fc(cond(final_states), 'stats_hat1_pred', nh=256 * enlargement, init_scale=np.sqrt(2)))
-        p_sa = tf.nn.relu(fc(p_sa, 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
-        p_sa = tf.nn.relu(fc(p_sa, 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
+        p_sa = tf.nn.relu(fc(cond(p_sa), 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
+        p_sa = tf.nn.relu(fc(cond(p_sa), 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
         p_sa = fc(p_sa, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
 
         # Get the marginal distribution of the next states given the current states and the source policy
         p_s_a = tf.nn.relu(fc(cond(next_states), 'stats_hat1_pred', nh=256 * enlargement,
                               init_scale=np.sqrt(2)))
-        p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
-        p_s_a = tf.nn.relu(fc(p_s_a, 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
+        p_s_a = tf.nn.relu(fc(cond(p_s_a), 'stats_hat2_pred', nh=128 * enlargement, init_scale=np.sqrt(2)))
+        p_s_a = tf.nn.relu(fc(cond(p_s_a), 'stats_hat3_pred', nh=64 * enlargement, init_scale=np.sqrt(2)))
         p_s_a = fc(p_s_a, 'stats_hat4_pred', nh=1, init_scale=np.sqrt(2))
 
         # We then use these samples to calculate the mutual information using the mutual information neural
