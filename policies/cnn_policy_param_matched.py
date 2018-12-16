@@ -7,6 +7,9 @@ from stochastic_policy import StochasticPolicy
 from tf_util import get_available_gpus
 from mpi_util import RunningMeanStd
 
+# For calculating the KL divergence
+e = 2.71828
+
 # Reshape to 2d
 def to2d(x):
     size = 1
@@ -236,7 +239,6 @@ class CnnPolicy(StochasticPolicy):
         self.aux_loss += emp_loss_coeff*loss
         self.empowerment_rew = reward
 
-
         mask = tf.random_uniform(shape=tf.shape(self.aux_loss), minval=0., maxval=1., dtype=tf.float32)
         mask = tf.cast(mask < self.proportion_of_exp_used_for_predictor_update, tf.float32)
         self.aux_loss = tf.reduce_sum(mask * self.aux_loss) / tf.maximum(tf.reduce_sum(mask), 1.)
@@ -325,17 +327,17 @@ class CnnPolicy(StochasticPolicy):
             y = tf.log(tf.reduce_sum(tf.exp(x - x_max), axis=axis)) + x_max
             return y
 
-        positive_expectation = tf.stop_gradient(p_sa)
-        negative_expectation = log_sum_exp(tf.stop_gradient(p_s_a), 0) - tf.log(4096.)
+        #positive_expectation = tf.stop_gradient(p_sa)
+        #negative_expectation = log_sum_exp(tf.stop_gradient(p_s_a), 0) - tf.log(4096.)
 
         # Use the Jenson shannon divergence for calculating the lower bound
-        # and the KL divergence for calulating the reward
+        # and the I_nwj measure for KL divergence for calculating the reward
 
         log_2 = math.log(2.)
         p = tf.stop_gradient(p_sa)
         q = tf.stop_gradient(p_s_a)
-        positive_expectation = log_2 - tf.nn.softplus(-p)
-        negative_expectation = tf.nn.softplus(-q) + q - log_2
+        positive_expectation = p + 1
+        negative_expectation = tf.exp(q)
 
         int_rew = positive_expectation - negative_expectation
         int_rew = tf.reshape(int_rew, (self.sy_nenvs, self.sy_nsteps - 1))
