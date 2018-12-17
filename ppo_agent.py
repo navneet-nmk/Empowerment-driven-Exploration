@@ -113,8 +113,7 @@ class PpoAgent(object):
                  comm=None, comm_train=None, use_news=False,
                  update_ob_stats_every_step=True,
                  int_coeff=None,
-                 ext_coeff=None,
-                 ):
+                 ext_coeff=None):
         self.lr = lr
         self.ext_coeff = ext_coeff
         self.int_coeff = int_coeff
@@ -333,7 +332,7 @@ class PpoAgent(object):
         # Get the normalized returns
 
         ret_int_normalized = (rets_int - self.ret_int_rms.mean)/np.sqrt(self.ret_int_rms.var)
-        ret_ext_normalized = rets_ext
+        ret_ext_normalized = (rets_ext-self.ret_ext_rms.mean)/np.sqrt(self.ret_ext_rms.var)
         ret_emp_normalized = (rets_emp - self.ret_emp_rms.mean) / np.sqrt(self.ret_emp_rms.var)
 
         # Get the normalzied advantages
